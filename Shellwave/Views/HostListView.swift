@@ -30,20 +30,18 @@ struct HostListView: View {
                         ForEach(filtered) { host in
                             HostCard(host: host, session: sessions.session(for: host))
                                 .onTapGesture { sessions.open(host) }
-                                .contextMenu {
-                                    Button("Verbinden", systemImage: "terminal") { sessions.open(host) }
-                                    Button("Bearbeiten", systemImage: "pencil") { editing = host }
-                                    Button("Server einrichten", systemImage: "wand.and.stars") { settingUp = host }
-                                    Button("Dateien (SFTP)", systemImage: "folder") { browsing = host }
-                                    Button("Duplizieren", systemImage: "plus.square.on.square") {
-                                        var copy = host
-                                        copy.id = UUID()
-                                        copy.name += " Kopie"
-                                        copy.knownHostKey = nil
-                                        editing = copy
+                                .contextMenu { actions(for: host) }
+                                .overlay(alignment: .topTrailing) {
+                                    Menu {
+                                        actions(for: host)
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .frame(width: 36, height: 36)
+                                            .contentShape(.rect)
                                     }
-                                    Divider()
-                                    Button("Löschen", systemImage: "trash", role: .destructive) { hosts.delete(host) }
+                                    .tint(.secondary)
+                                    .padding(6)
                                 }
                         }
                     }
@@ -68,6 +66,24 @@ struct HostListView: View {
         .sheet(item: $browsing) { host in
             NavigationStack { SFTPBrowserView(host: host, certificates: certificates, hosts: hosts) }
         }
+    }
+
+    @ViewBuilder
+    private func actions(for host: Host) -> some View {
+        Button("Verbinden", systemImage: "terminal") { sessions.open(host) }
+        Button("Bearbeiten", systemImage: "pencil") { editing = hosts.hosts.first { $0.id == host.id } ?? host }
+        Button("Server einrichten", systemImage: "wand.and.stars") { settingUp = host }
+        Button("Dateien (SFTP)", systemImage: "folder") { browsing = host }
+        Button("Duplizieren", systemImage: "plus.square.on.square") {
+            var copy = host
+            copy.id = UUID()
+            copy.name += " Kopie"
+            copy.knownHostKey = nil
+            copy.setupDone = false
+            editing = copy
+        }
+        Divider()
+        Button("Löschen", systemImage: "trash", role: .destructive) { hosts.delete(host) }
     }
 
     private var emptyState: some View {
@@ -122,6 +138,7 @@ struct HostCard: View {
             if let session {
                 SessionDot(session: session)
             }
+            Color.clear.frame(width: 28)
         }
         .padding(16)
         .contentShape(.rect)

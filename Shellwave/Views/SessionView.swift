@@ -10,6 +10,7 @@ struct SessionView: View {
     @State private var showSnippets = false
     @State private var showSFTP = false
     @State private var showThemes = false
+    @State private var editingHost: Host?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -59,6 +60,9 @@ struct SessionView: View {
         }
         .sheet(isPresented: $showSFTP) {
             NavigationStack { SFTPBrowserView(host: session.host, certificates: certificates, hosts: hosts) }
+        }
+        .sheet(item: $editingHost) { host in
+            NavigationStack { HostEditorView(host: host) }
         }
         .confirmationDialog("Farbschema", isPresented: $showThemes) {
             ForEach(TerminalTheme.all) { theme in
@@ -116,6 +120,9 @@ struct SessionView: View {
                 Menu {
                     Button("Snippets", systemImage: "text.badge.plus") { showSnippets = true }
                     Button("Dateien (SFTP)", systemImage: "folder") { showSFTP = true }
+                    Button("Host bearbeiten", systemImage: "pencil") {
+                        editingHost = hosts.hosts.first { $0.id == session.host.id } ?? session.host
+                    }
                     Divider()
                     Button("Neu verbinden", systemImage: "arrow.clockwise") { session.reconnect() }
                     Button("Schrift größer", systemImage: "textformat.size.larger") { fontSize = min(fontSize + 1, 24) }
