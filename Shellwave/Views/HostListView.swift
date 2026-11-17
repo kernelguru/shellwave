@@ -25,12 +25,17 @@ struct HostListView: View {
             if hosts.hosts.isEmpty {
                 emptyState
             } else {
-                GlassEffectContainer(spacing: 14) {
-                    LazyVGrid(columns: columns, spacing: 14) {
+                // Bewusst ohne GlassEffectContainer: darin erscheinen Kontextmenüs der Karten nicht.
+                LazyVGrid(columns: columns, spacing: 14) {
                         ForEach(filtered) { host in
-                            HostCard(host: host, session: sessions.session(for: host))
-                                .onTapGesture { sessions.open(host) }
-                                .contextMenu { actions(for: host) }
+                            Button {
+                                sessions.open(host)
+                            } label: {
+                                HostCard(host: host, session: sessions.session(for: host))
+                            }
+                            .buttonStyle(.plain)
+                            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 22, style: .continuous))
+                            .contextMenu { actions(for: host) }
                                 .overlay(alignment: .topTrailing) {
                                     Menu {
                                         actions(for: host)
@@ -44,7 +49,6 @@ struct HostListView: View {
                                     .padding(6)
                                 }
                         }
-                    }
                 }
                 .padding(16)
             }

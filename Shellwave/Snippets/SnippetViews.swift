@@ -19,9 +19,14 @@ struct SnippetListView: View {
         ScrollView {
             LazyVStack(spacing: 12) {
                 ForEach(filtered) { snippet in
-                    SnippetCard(snippet: snippet)
-                        .onTapGesture { running = snippet }
-                        .contextMenu {
+                    Button {
+                        running = snippet
+                    } label: {
+                        SnippetCard(snippet: snippet)
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .contextMenu {
                             Button("Auf Hosts ausführen", systemImage: "play.fill") { running = snippet }
                             Button("Bearbeiten", systemImage: "pencil") { editing = snippet }
                             Button("Kopieren", systemImage: "doc.on.doc") { UIPasteboard.general.string = snippet.command }
