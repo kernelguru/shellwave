@@ -22,7 +22,9 @@ enum SSHConnector {
     ) async throws -> SSHClient {
         let auth = try await authentication(for: host, certificates: certificates, override: override, username: username)
         let hostID = host.id
-        let validator = TOFUHostKeyValidator(known: host.knownHostKey) { key in
+        // Immer den aktuell gespeicherten Host-Key nehmen (die Session hält evtl. eine ältere Kopie).
+        let known = hosts.hosts.first { $0.id == hostID }?.knownHostKey ?? host.knownHostKey
+        let validator = TOFUHostKeyValidator(known: known) { key in
             Task { @MainActor in hosts.learnHostKey(key, for: hostID) }
         }
         var settings = SSHClientSettings(

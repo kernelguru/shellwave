@@ -54,14 +54,10 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/Shellwave.app Payload/
           # Statische Frameworks (mosh, protobuf) sind schon ins Binary gelinkt und
           # dürfen nicht im Bundle landen, sonst lehnt iOS die Installation ab.
-          for fw in Payload/Shellwave.app/Frameworks/*.framework; do
-            [ -d "$fw" ] || continue
-            bin="$fw/$(basename "$fw" .framework)"
-            if [ ! -f "$bin" ] || file "$bin" | grep -q "ar archive"; then
-              echo "Entferne statisches Framework: $fw"
-              rm -rf "$fw"
-            fi
-          done
+          ls -la Payload/Shellwave.app/Frameworks/*.framework || true
+          file Payload/Shellwave.app/Frameworks/*.framework/* || true
+          rm -rf Payload/Shellwave.app/Frameworks/mosh.framework Payload/Shellwave.app/Frameworks/Protobuf_C_.framework
+          rmdir Payload/Shellwave.app/Frameworks 2>/dev/null || true
           echo "--- Bundle-Inhalt ---"
           find Payload/Shellwave.app -maxdepth 2 | sort
           du -sh Payload/Shellwave.app
