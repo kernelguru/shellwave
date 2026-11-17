@@ -3,7 +3,10 @@ import SwiftUI
 struct HostListView: View {
     @EnvironmentObject private var hosts: HostStore
     @EnvironmentObject private var sessions: SessionManager
+    @EnvironmentObject private var certificates: CertificateManager
     @State private var editing: Host?
+    @State private var settingUp: Host?
+    @State private var browsing: Host?
     @State private var search = ""
 
     private var filtered: [Host] {
@@ -30,6 +33,8 @@ struct HostListView: View {
                                 .contextMenu {
                                     Button("Verbinden", systemImage: "terminal") { sessions.open(host) }
                                     Button("Bearbeiten", systemImage: "pencil") { editing = host }
+                                    Button("Server einrichten", systemImage: "wand.and.stars") { settingUp = host }
+                                    Button("Dateien (SFTP)", systemImage: "folder") { browsing = host }
                                     Button("Duplizieren", systemImage: "plus.square.on.square") {
                                         var copy = host
                                         copy.id = UUID()
@@ -56,6 +61,12 @@ struct HostListView: View {
         }
         .sheet(item: $editing) { host in
             NavigationStack { HostEditorView(host: host) }
+        }
+        .sheet(item: $settingUp) { host in
+            NavigationStack { ServerSetupView(host: host) }
+        }
+        .sheet(item: $browsing) { host in
+            NavigationStack { SFTPBrowserView(host: host, certificates: certificates, hosts: hosts) }
         }
     }
 
@@ -102,8 +113,9 @@ struct HostCard: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 HStack(spacing: 6) {
+                    Badge(text: host.transport.label, symbol: host.transport == .mosh ? "antenna.radiowaves.left.and.right" : "network")
                     Badge(text: host.auth.label, symbol: host.auth.symbol)
-                    ForEach(host.tags.prefix(2), id: \.self) { Badge(text: $0, symbol: "tag") }
+                    ForEach(host.tags.prefix(1), id: \.self) { Badge(text: $0, symbol: "tag") }
                 }
             }
             Spacer(minLength: 0)

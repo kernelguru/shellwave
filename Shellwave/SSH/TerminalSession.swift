@@ -1,11 +1,13 @@
 import Citadel
+import Darwin
 import Foundation
+import MoshKit
 import NIOCore
 import NIOSSH
 import SwiftTerm
 import UIKit
 
-/// Eine interaktive SSH-Session: Verbindung, PTY und der Datenfluss zwischen Server und Terminal.
+/// Eine interaktive Session: SSH oder Mosh, PTY und der Datenfluss zwischen Server und Terminal.
 @MainActor
 final class TerminalSession: ObservableObject, Identifiable {
     enum State: Equatable {
@@ -26,30 +28,44 @@ final class TerminalSession: ObservableObject, Identifiable {
             case .failed: return "Fehler"
             }
         }
+
+        var isActive: Bool {
+            switch self {
+            case .renewingCertificate, .connecting, .connected: return true
+            default: return false
+            }
+        }
     }
 
     let id = UUID()
     let host: Host
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle {
+        didSet { if oldValue != state { onStateChange?(self) } }
+    }
     @Published private(set) var title: String = ""
-    let startedAt = Date.now
+    /// Tatsächlich genutzter Transport (Mosh fällt bei Problemen auf SSH zurück).
+    @Published private(set) var activeTransport: Transport = .ssh
+    @Published private(set) var startedAt = Date.now
+
+    /// Wird bei jedem Statuswechsel gerufen (Live Activity, Keep-alive).
+    var onStateChange: ((TerminalSession) -> Void)?
 
     /// Die Terminal-View gehört zur Session, damit Bildschirm und Scrollback erhalten bleiben,
     /// wenn man die Session zuklappt und später wieder öffnet.
     lazy var terminalView: TerminalView = {
         let view = TerminalView(frame: .zero, font: UIFont.monospacedSystemFont(ofSize: 13, weight: .regular))
-        let background = UIColor(red: 0.02, green: 0.06, blue: 0.07, alpha: 1)
-        view.backgroundColor = background
-        view.nativeBackgroundColor = background
-        view.nativeForegroundColor = UIColor(white: 0.92, alpha: 1)
-        view.caretColor = UIColor(Theme.mint)
         view.optionAsMetaKey = true
+        TerminalThemeStore.apply(TerminalThemeStore.current, to: view)
         return view
     }()
 
-    private let certificates: CertificateManager
-    private let hosts: HostStore
+    /// Claude-Assistent dieser Session (wird beim ersten Öffnen erzeugt).
+    lazy var claude: ClaudeAgent = ClaudeAgent(session: self)
+
+    let certificates: CertificateManager
+    let hosts: HostStore
     private var client: SSHClient?
+    private var mosh: MoshRunner?
     private var runTask: Task<Void, Never>?
     private var inputContinuation: AsyncStream<[UInt8]>.Continuation?
     private var size = (cols: 80, rows: 24)
@@ -60,37 +76,50 @@ final class TerminalSession: ObservableObject, Identifiable {
         self.certificates = certificates
         self.hosts = hosts
         self.title = host.displayName
+        self.activeTransport = host.transport
     }
 
     // MARK: Steuerung
 
     func start() {
         guard runTask == nil else { return }
+        startedAt = .now
         runTask = Task { [weak self] in
             await self?.run()
         }
     }
 
     func reconnect() {
-        disconnect()
+        teardown()
         state = .idle
         start()
     }
 
     func disconnect() {
+        teardown()
+        if state.isActive { state = .closed }
+    }
+
+    private func teardown() {
         inputContinuation?.finish()
         inputContinuation = nil
+        mosh?.stop()
+        mosh = nil
         runTask?.cancel()
         runTask = nil
+        resizeHandler = nil
         let client = self.client
         self.client = nil
         Task { try? await client?.close() }
-        if state == .connected || state == .connecting { state = .closed }
     }
 
     /// Tastatureingaben vom Terminal.
     func send(_ bytes: [UInt8]) {
-        inputContinuation?.yield(bytes)
+        if let mosh {
+            mosh.write(bytes)
+        } else {
+            inputContinuation?.yield(bytes)
+        }
     }
 
     func send(text: String) {
@@ -100,6 +129,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     func resize(cols: Int, rows: Int) {
         guard cols > 0, rows > 0 else { return }
         size = (cols, rows)
+        mosh?.resize(cols: cols, rows: rows)
         if let handler = resizeHandler {
             Task { await handler(cols, rows) }
         }
@@ -109,25 +139,55 @@ final class TerminalSession: ObservableObject, Identifiable {
         title = t.isEmpty ? host.displayName : t
     }
 
+    /// Letzte Ausgaben als Rohdaten (für Claude-Kontext), auf 24 KB begrenzt.
+    private var recentOutput: [UInt8] = []
+
+    private func record(_ bytes: [UInt8]) {
+        recentOutput.append(contentsOf: bytes)
+        if recentOutput.count > 24_000 {
+            recentOutput.removeFirst(recentOutput.count - 24_000)
+        }
+    }
+
+    /// Ausgabe ins Terminal schreiben und für den Kontext merken.
+    private func display(_ bytes: [UInt8]) {
+        terminalView.feed(byteArray: bytes[...])
+        record(bytes)
+    }
+
+    /// Letzte Zeilen der Ausgabe als Klartext ohne Steuerzeichen (Kontext für Claude).
+    func screenText(lines: Int = 40) -> String {
+        let text = ANSIStripper.strip(String(decoding: recentOutput, as: UTF8.self))
+        let all = text.split(separator: "\n", omittingEmptySubsequences: false)
+        return all.suffix(lines).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: Ablauf
 
     private func run() async {
-        do {
-            let auth = try await makeAuthentication()
-            state = .connecting
-
-            let hostID = host.id
-            let hostStore = hosts
-            let validator = TOFUHostKeyValidator(known: host.knownHostKey) { key in
-                Task { @MainActor in hostStore.learnHostKey(key, for: hostID) }
+        if host.transport == .mosh {
+            do {
+                try await runMosh()
+                return
+            } catch is CancellationError {
+                state = .closed
+                runTask = nil
+                return
+            } catch {
+                // Mosh nicht verfügbar: sichtbar machen und mit SSH weiter.
+                let note = "\r\n\u{1B}[33m[Shellwave] Mosh nicht möglich: \(Self.describe(error)) – weiter mit SSH.\u{1B}[0m\r\n"
+                terminalView.feed(text: note)
             }
-            let settings = SSHClientSettings(
-                host: host.hostname,
-                port: host.port,
-                authenticationMethod: { auth() },
-                hostKeyValidator: .custom(validator)
-            )
-            let client = try await SSHClient.connect(to: settings)
+        }
+        await runSSH()
+    }
+
+    private func runSSH() async {
+        activeTransport = .ssh
+        do {
+            state = host.auth == .certificate ? .renewingCertificate : .connecting
+            let client = try await SSHConnector.connect(to: host, certificates: certificates, hosts: hosts)
+            state = .connecting
             self.client = client
 
             let (stream, continuation) = AsyncStream<[UInt8]>.makeStream()
@@ -148,10 +208,8 @@ final class TerminalSession: ObservableObject, Identifiable {
                 self.resizeHandler = { cols, rows in
                     try? await outbound.changeSize(cols: cols, rows: rows, pixelWidth: 0, pixelHeight: 0)
                 }
-                // Größe nachziehen, falls sich das Terminal seit dem Request geändert hat.
                 try? await outbound.changeSize(cols: self.size.cols, rows: self.size.rows, pixelWidth: 0, pixelHeight: 0)
 
-                // Eingabe in genau einer Reihenfolge an den Server schreiben.
                 let writer = Task {
                     for await chunk in stream {
                         try? await outbound.write(ByteBuffer(bytes: chunk))
@@ -159,11 +217,14 @@ final class TerminalSession: ObservableObject, Identifiable {
                 }
                 defer { writer.cancel() }
 
+                if let attach = self.tmuxAttachCommand {
+                    try? await outbound.write(ByteBuffer(string: attach + "\r"))
+                }
+
                 for try await event in inbound {
                     switch event {
                     case .stdout(let buffer), .stderr(let buffer):
-                        let bytes = Array(buffer.readableBytesView)
-                        self.terminalView.feed(byteArray: bytes[...])
+                        self.display(Array(buffer.readableBytesView))
                     }
                 }
             }
@@ -173,42 +234,128 @@ final class TerminalSession: ObservableObject, Identifiable {
             state = .closed
         } catch {
             resizeHandler = nil
-            state = .failed(Self.describe(error))
+            if runTask != nil { state = .failed(Self.describe(error)) }
         }
         try? await client?.close()
         client = nil
         runTask = nil
     }
 
-    /// Baut die Anmeldemethode je nach Host-Einstellung.
-    private func makeAuthentication() async throws -> @Sendable () -> SSHAuthenticationMethod {
-        let username = host.username
-        switch host.auth {
-        case .password:
-            let password = host.password
-            guard !password.isEmpty else { throw SSHConnectError.missingPassword }
-            return { .passwordBased(username: username, password: password) }
-
-        case .key:
-            let key = DeviceKey.shared.privateKey
-            return { .ed25519(username: username, privateKey: key) }
-
-        case .certificate:
-            state = .renewingCertificate
-            let cert = try await certificates.certificate(for: host.effectivePrincipals)
-            guard let certified = cert.parsed else { throw CertificateError.invalidCertificate }
-            let key = DeviceKey.shared.privateKey
-            return {
-                .custom(CertificateAuthDelegate(username: username, privateKey: key, certifiedKey: certified))
-            }
-        }
+    /// Befehl für tmux-Auto-Attach; fällt auf die normale Shell zurück, wenn tmux fehlt.
+    private var tmuxAttachCommand: String? {
+        let name = host.tmuxSession.trimmed
+        guard !name.isEmpty else { return nil }
+        let q = SSHConnector.quote(name)
+        return "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s \(q)"
     }
 
-    private static func describe(_ error: Error) -> String {
+    // MARK: Mosh
+
+    private func runMosh() async throws {
+        activeTransport = .mosh
+        state = host.auth == .certificate ? .renewingCertificate : .connecting
+        let bootstrapClient = try await SSHConnector.connect(to: host, certificates: certificates, hosts: hosts)
+        state = .connecting
+
+        var command = "PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin\" mosh-server new -s -c 256 -l LANG=en_US.UTF-8"
+        let name = host.tmuxSession.trimmed
+        if !name.isEmpty {
+            let q = SSHConnector.quote(name)
+            let inner = "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s \(q) || exec ${SHELL:-/bin/sh} -l"
+            command += " -- sh -c \(SSHConnector.quote(inner))"
+        }
+        let result = try await SSHConnector.runCapturing(command, on: bootstrapClient)
+        try? await bootstrapClient.close()
+
+        guard let (port, key) = Self.parseMoshConnect(result.output) else {
+            if result.output.contains("not found") || result.exitCode == 127 {
+                throw MoshError.serverMissing
+            }
+            throw MoshError.bootstrapFailed(result.output.trimmed)
+        }
+        let ip = try await Self.resolve(host.hostname)
+
+        let runner = MoshRunner(
+            parameters: .init(ip: ip, port: port, key: key),
+            cols: size.cols,
+            rows: size.rows
+        )
+        runner.onOutput = { [weak self] bytes in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.display(bytes) } }
+        }
+        runner.onExit = { [weak self] code in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.mosh = nil
+                    if self.state == .connected {
+                        self.state = code == 0 ? .closed : .failed("Mosh wurde beendet (Code \(code)).")
+                    }
+                    self.runTask = nil
+                }
+            }
+        }
+        mosh = runner
+        state = .connected
+        runner.start()
+    }
+
+    static func parseMoshConnect(_ text: String) -> (String, String)? {
+        for line in text.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: " ")
+            if parts.count >= 4, parts[0] == "MOSH", parts[1] == "CONNECT" {
+                return (String(parts[2]), String(parts[3]))
+            }
+        }
+        return nil
+    }
+
+    /// Hostname → IP (Mosh braucht eine numerische Adresse).
+    nonisolated static func resolve(_ hostname: String) async throws -> String {
+        try await Task.detached {
+            var hints = addrinfo()
+            hints.ai_family = AF_UNSPEC
+            hints.ai_socktype = SOCK_DGRAM
+            var result: UnsafeMutablePointer<addrinfo>?
+            guard getaddrinfo(hostname, nil, &hints, &result) == 0, let first = result else {
+                throw MoshError.resolveFailed(hostname)
+            }
+            defer { freeaddrinfo(result) }
+
+            var candidates: [(Int32, String)] = []
+            var ptr: UnsafeMutablePointer<addrinfo>? = first
+            while let ai = ptr {
+                var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(ai.pointee.ai_addr, ai.pointee.ai_addrlen, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    candidates.append((ai.pointee.ai_family, String(cString: buffer)))
+                }
+                ptr = ai.pointee.ai_next
+            }
+            if let v4 = candidates.first(where: { $0.0 == AF_INET }) { return v4.1 }
+            if let any = candidates.first { return any.1 }
+            throw MoshError.resolveFailed(hostname)
+        }.value
+    }
+
+    static func describe(_ error: Error) -> String {
         if let e = error as? LocalizedError, let text = e.errorDescription { return text }
         if error is AuthenticationFailed || "\(error)".contains("allAuthenticationOptionsFailed") {
             return SSHConnectError.authenticationRejected.errorDescription ?? "\(error)"
         }
         return "\(error)"
+    }
+}
+
+enum MoshError: LocalizedError {
+    case serverMissing
+    case bootstrapFailed(String)
+    case resolveFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .serverMissing: return "mosh-server ist auf dem Server nicht installiert"
+        case .bootstrapFailed(let out): return "mosh-server lieferte keine Verbindungsdaten\(out.isEmpty ? "" : ": \(out.prefix(200))")"
+        case .resolveFailed(let h): return "Adresse von \(h) nicht auflösbar"
+        }
     }
 }

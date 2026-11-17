@@ -8,8 +8,9 @@ packages:
     url: https://github.com/orlandos-nl/Citadel
     from: 0.12.1
   SwiftTerm:
+    # 1.99.x baut nicht mit Xcode 26.3 (PowerlineRenderer); 1.20.0 hat alles, was wir brauchen
     url: https://github.com/migueldeicaza/SwiftTerm
-    from: 1.99.3
+    exactVersion: 1.20.0
   swift-nio-ssh:
     # derselbe Fork, den Citadel nutzt (Zertifikats-Login)
     url: https://github.com/Wellz26/swift-nio-ssh
@@ -17,12 +18,23 @@ packages:
   swift-nio:
     url: https://github.com/apple/swift-nio
     from: 2.81.0
+  MoshKit:
+    path: Packages/MoshKit
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: 0.5.0
+    CURRENT_PROJECT_VERSION: 5
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
 targets:
   Shellwave:
     type: application
     platform: iOS
     sources:
       - Shellwave
+      - Shared
     dependencies:
       - package: Citadel
       - package: SwiftTerm
@@ -30,6 +42,9 @@ targets:
         product: NIOSSH
       - package: swift-nio
         product: NIOCore
+      - package: MoshKit
+      - target: ShellwaveWidgets
+        embed: true
     scheme: {}
     info:
       path: Shellwave/Info.plist
@@ -47,18 +62,43 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSLocalNetworkUsageDescription: Shellwave verbindet sich per SSH mit Servern und mit deinem UCM im lokalen Netzwerk.
+        UIBackgroundModes:
+          - location
+        NSSupportsLiveActivities: true
+        CFBundleURLTypes:
+          - CFBundleURLName: de.marck.shellwave
+            CFBundleURLSchemes:
+              - shellwave
+        NSLocationWhenInUseUsageDescription: Shellwave nutzt grobe Standort-Updates nur, um SSH-Sessions im Hintergrund offen zu halten. Die Position wird nicht gespeichert.
+        NSLocationAlwaysAndWhenInUseUsageDescription: Shellwave nutzt grobe Standort-Updates nur, um SSH-Sessions im Hintergrund offen zu halten. Die Position wird nicht gespeichert.
+        NSFaceIDUsageDescription: Freigaben für Claude-Aktionen werden mit Face ID bestätigt.
+        NSLocalNetworkUsageDescription: Shellwave verbindet sich per SSH und Mosh mit Servern und mit deinem UCM im lokalen Netzwerk.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.marck.shellwave
-        MARKETING_VERSION: 0.1.0
-        CURRENT_PROJECT_VERSION: 1
-        SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        CODE_SIGNING_ALLOWED: "NO"
-        CODE_SIGNING_REQUIRED: "NO"
-        CODE_SIGN_IDENTITY: ""
+  ShellwaveWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ShellwaveWidgets
+      - Shared
+    info:
+      path: ShellwaveWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Shellwave
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.marck.shellwave.widgets
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: "YES"

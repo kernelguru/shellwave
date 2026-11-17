@@ -9,6 +9,7 @@ struct HostEditorView: View {
     @State private var principalsText: String
     @State private var tagsText: String
     @State private var password: String
+    @State private var showSetup = false
 
     init(host: Host) {
         _host = State(initialValue: host)
@@ -60,6 +61,29 @@ struct HostEditorView: View {
                 }
             }
 
+            Section {
+                Picker("Transport", selection: $host.transport) {
+                    ForEach(Transport.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Im Hintergrund am Leben halten", isOn: $host.keepAlive)
+                TextField("tmux-Session (leer = aus)", text: $host.tmuxSession)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            } header: {
+                Text("Session")
+            } footer: {
+                Text("Mosh übersteht Netzwechsel und Sperrbildschirm; auf dem Server muss mosh-server installiert sein (UDP 60000–61000). Keep-alive nutzt grobe Standort-Updates. Mit tmux-Session hängt sich die App beim Verbinden automatisch an.")
+            }
+
+            if !isNew {
+                Section {
+                    Button("Server einrichten …", systemImage: "wand.and.stars") { showSetup = true }
+                } footer: {
+                    Text(host.setupDone ? "Eingerichtet: Zertifikats-Login aktiv." : "Richtet TrustedUserCAKeys und Principals auf dem Server ein, optional Mosh und Claude Code.")
+                }
+            }
+
             Section("Darstellung") {
                 Picker("Farbe", selection: $host.color) {
                     ForEach(HostColor.allCases) { c in
@@ -87,6 +111,9 @@ struct HostEditorView: View {
         }
         .scrollContentBackground(.hidden)
         .background(AppBackground())
+        .sheet(isPresented: $showSetup, onDismiss: reloadAfterSetup) {
+            NavigationStack { ServerSetupView(host: host) }
+        }
         .navigationTitle(isNew ? "Neuer Host" : host.displayName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -98,6 +125,17 @@ struct HostEditorView: View {
                     .disabled(!canSave)
             }
         }
+    }
+
+    /// Nach dem Einrichten hat sich der Host im Speicher geändert (Anmeldung, Principals).
+    private func reloadAfterSetup() {
+        guard let stored = hosts.hosts.first(where: { $0.id == host.id }), stored.setupDone else { return }
+        host.auth = stored.auth
+        host.principals = stored.principals
+        host.principalMap = stored.principalMap
+        host.setupDone = stored.setupDone
+        host.knownHostKey = stored.knownHostKey
+        principalsText = stored.principals.joined(separator: ", ")
     }
 
     private func save() {

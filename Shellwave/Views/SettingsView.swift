@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @EnvironmentObject private var ucm: UCMSettings
@@ -92,6 +93,12 @@ struct SettingsView: View {
 
             DeviceKeySection()
 
+            ClaudeSettingsSection()
+
+            AppPreferencesSection()
+
+            BackupSection()
+
             Section("Über") {
                 LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–")
             }
@@ -153,5 +160,146 @@ struct DeviceKeySection: View {
         } footer: {
             Text("Ed25519, erzeugt auf dem Gerät. Der private Teil verlässt das Gerät nie. Zum manuellen Signieren den Public Key z. B. an UCM Remote teilen.")
         }
+    }
+}
+
+/// Claude: Modus, API-Schlüssel, Modell und Freigaberegeln.
+struct ClaudeSettingsSection: View {
+    @EnvironmentObject private var claude: ClaudeSettings
+    @State private var keyDraft = ""
+
+    var body: some View {
+        Section {
+            Picker("Modus", selection: Binding(get: { claude.mode }, set: { claude.mode = $0 })) {
+                ForEach(ClaudeMode.allCases) { Text($0.label).tag($0) }
+            }
+            SecureField(claude.apiKey.isEmpty ? "Claude-API-Schlüssel" : "API-Schlüssel (gespeichert)", text: $keyDraft)
+                .onSubmit(save)
+            if !keyDraft.isEmpty {
+                Button("API-Schlüssel sichern", systemImage: "key.fill", action: save)
+            }
+            TextField("Modell", text: $claude.model)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.body.monospaced())
+            Toggle("Lesende Befehle ohne Rückfrage", isOn: $claude.autoApproveReadOnly)
+            Toggle("Freigaben mit Face ID bestätigen", isOn: $claude.requireBiometrics)
+            if claude.mode == .claudeCode {
+                Toggle("API-Schlüssel an Claude Code übergeben", isOn: $claude.passKeyToServer)
+            }
+        } header: {
+            Text("Claude")
+        } footer: {
+            Text(claude.mode == .claudeCode
+                 ? "Claude Code läuft auf dem Server (Installation über „Server einrichten“). Ohne übergebenen Schlüssel nutzt es das Login, das auf dem Server eingerichtet ist."
+                 : "Die App ruft die Claude-API direkt auf und führt Befehle per SSH aus. Dafür ist ein API-Schlüssel nötig.")
+        }
+    }
+
+    private func save() {
+        guard !keyDraft.trimmed.isEmpty else { return }
+        claude.saveAPIKey(keyDraft)
+        keyDraft = ""
+    }
+}
+
+/// Terminal-Darstellung, Live Activity und Keep-alive.
+struct AppPreferencesSection: View {
+    @EnvironmentObject private var sessions: SessionManager
+    @AppStorage("liveActivity.enabled") private var liveActivity = true
+    @AppStorage("terminal.fontSize") private var fontSize: Double = 13
+    @State private var themeID = TerminalThemeStore.current.id
+
+    var body: some View {
+        Section {
+            Picker("Farbschema", selection: $themeID) {
+                ForEach(TerminalTheme.all) { Text($0.name).tag($0.id) }
+            }
+            .onChange(of: themeID) {
+                guard let theme = TerminalTheme.all.first(where: { $0.id == themeID }) else { return }
+                TerminalThemeStore.select(theme)
+                for s in sessions.sessions { TerminalThemeStore.apply(theme, to: s.terminalView) }
+            }
+            Stepper("Schriftgröße \(Int(fontSize)) pt", value: $fontSize, in: 8...24)
+            Toggle("Live Activity im Dynamic Island", isOn: $liveActivity)
+            LabeledContent("Keep-alive") {
+                Text(keepAliveText).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Terminal und Sessions")
+        } footer: {
+            Text("Keep-alive braucht die Standort-Freigabe „Beim Verwenden“. Die App nutzt nur grobe Updates und verwirft die Position.")
+        }
+    }
+
+    private var keepAliveText: String {
+        switch sessions.keepAlive.authorization {
+        case .denied, .restricted: return "Standort verweigert"
+        case .notDetermined: return "noch nicht gefragt"
+        default: return sessions.keepAlive.isActive ? "aktiv" : "bereit"
+        }
+    }
+}
+
+/// Hosts und Snippets exportieren und importieren (ohne Passwörter und Schlüssel).
+struct BackupSection: View {
+    @EnvironmentObject private var hosts: HostStore
+    @EnvironmentObject private var snippets: SnippetStore
+    @State private var exportURL: URL?
+    @State private var showImporter = false
+    @State private var message: String?
+
+    struct Backup: Codable {
+        var version = 1
+        var hosts: [Host]
+        var snippets: [Snippet]
+    }
+
+    var body: some View {
+        Section {
+            Button("Exportieren", systemImage: "square.and.arrow.up") { export() }
+            Button("Importieren", systemImage: "square.and.arrow.down") { showImporter = true }
+            if let message {
+                Text(message).font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Sicherung")
+        } footer: {
+            Text("JSON mit Hosts, Principals und Snippets. Passwörter, Geräte-Key und Zertifikate bleiben im Schlüsselbund.")
+        }
+        .sheet(item: $exportURL) { url in ShareSheet(items: [url]) }
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.json]) { result in
+            guard case .success(let url) = result else { return }
+            importBackup(url)
+        }
+    }
+
+    private func export() {
+        let backup = Backup(hosts: hosts.hosts, snippets: snippets.snippets)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(backup) else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("shellwave-backup.json")
+        try? data.write(to: url)
+        exportURL = url
+    }
+
+    private func importBackup(_ url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url),
+              let backup = try? JSONDecoder().decode(Backup.self, from: data) else {
+            message = "Datei konnte nicht gelesen werden."
+            return
+        }
+        var added = 0
+        for host in backup.hosts where !hosts.hosts.contains(where: { $0.id == host.id }) {
+            hosts.upsert(host)
+            added += 1
+        }
+        var merged = snippets.snippets
+        for s in backup.snippets where !merged.contains(where: { $0.id == s.id }) { merged.append(s) }
+        snippets.replaceAll(merged)
+        message = "\(added) Host(s) und \(backup.snippets.count) Snippet(s) übernommen."
     }
 }

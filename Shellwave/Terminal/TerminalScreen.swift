@@ -43,15 +43,15 @@ struct TerminalScreen: UIViewRepresentable {
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             let bytes = Array(data)
-            Task { @MainActor in session.send(bytes) }
+            MainActor.assumeIsolated { session.send(bytes) }
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            Task { @MainActor in session.resize(cols: newCols, rows: newRows) }
+            MainActor.assumeIsolated { session.resize(cols: newCols, rows: newRows) }
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {
-            Task { @MainActor in session.setTitle(title) }
+            MainActor.assumeIsolated { session.setTitle(title) }
         }
 
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
