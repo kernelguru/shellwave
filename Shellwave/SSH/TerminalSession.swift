@@ -38,7 +38,9 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     let id = UUID()
-    let host: Host
+    private let initialHost: Host
+    /// Immer die aktuell gespeicherte Fassung des Hosts (Änderungen gelten beim nächsten Verbinden).
+    var host: Host { hosts.hosts.first { $0.id == initialHost.id } ?? initialHost }
     @Published private(set) var state: State = .idle {
         didSet { if oldValue != state { onStateChange?(self) } }
     }
@@ -72,7 +74,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     private var resizeHandler: ((Int, Int) async -> Void)?
 
     init(host: Host, certificates: CertificateManager, hosts: HostStore) {
-        self.host = host
+        self.initialHost = host
         self.certificates = certificates
         self.hosts = hosts
         self.title = host.displayName
