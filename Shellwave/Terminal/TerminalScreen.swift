@@ -5,22 +5,37 @@ import UIKit
 /// SwiftTerm-Terminal als SwiftUI-View, verbunden mit einer `TerminalSession`.
 struct TerminalScreen: UIViewRepresentable {
     @ObservedObject var session: TerminalSession
-    var fontSize: CGFloat
+    @Binding var fontSize: Double
+
+    static let minFontSize: Double = 7
+    static let maxFontSize: Double = 28
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(session: session)
+        Coordinator(session: session, fontSize: $fontSize)
     }
 
     func makeUIView(context: Context) -> TerminalView {
         let view = session.terminalView
         view.terminalDelegate = context.coordinator
         view.font = Self.font(size: fontSize)
+
+        // Zoomen mit zwei Fingern: Die View wird zwischen Sessions wiederverwendet,
+        // daher alte Pinch-Gesten von früheren Coordinators entfernen.
+        for gesture in view.gestureRecognizers ?? [] where gesture.name == "shellwave.pinch" {
+            view.removeGestureRecognizer(gesture)
+        }
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.name = "shellwave.pinch"
+        pinch.delegate = context.coordinator
+        view.addGestureRecognizer(pinch)
+
         DispatchQueue.main.async { _ = view.becomeFirstResponder() }
         return view
     }
 
     func updateUIView(_ view: TerminalView, context: Context) {
-        if abs(view.font.pointSize - fontSize) > 0.1 {
+        context.coordinator.fontSize = $fontSize
+        if abs(Double(view.font.pointSize) - fontSize) > 0.1 {
             view.font = Self.font(size: fontSize)
         }
     }
@@ -30,15 +45,40 @@ struct TerminalScreen: UIViewRepresentable {
         view.removeFromSuperview()
     }
 
-    static func font(size: CGFloat) -> UIFont {
-        UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    static func font(size: Double) -> UIFont {
+        UIFont.monospacedSystemFont(ofSize: CGFloat(size), weight: .regular)
     }
 
-    final class Coordinator: NSObject, TerminalViewDelegate {
+    final class Coordinator: NSObject, TerminalViewDelegate, UIGestureRecognizerDelegate {
         let session: TerminalSession
+        var fontSize: Binding<Double>
+        private var pinchStart: Double = 13
 
-        init(session: TerminalSession) {
+        init(session: TerminalSession, fontSize: Binding<Double>) {
             self.session = session
+            self.fontSize = fontSize
+        }
+
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            switch gesture.state {
+            case .began:
+                pinchStart = fontSize.wrappedValue
+            case .changed:
+                // In halben Punkten schalten, damit der Server nicht bei jedem Pixel eine neue Größe bekommt
+                let raw = pinchStart * Double(gesture.scale)
+                let stepped = (raw * 2).rounded() / 2
+                let clamped = min(max(stepped, TerminalScreen.minFontSize), TerminalScreen.maxFontSize)
+                if clamped != fontSize.wrappedValue {
+                    fontSize.wrappedValue = clamped
+                    UISelectionFeedbackGenerator().selectionChanged()
+                }
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            false
         }
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {

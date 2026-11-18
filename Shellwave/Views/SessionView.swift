@@ -18,7 +18,7 @@ struct SessionView: View {
 
             VStack(spacing: 0) {
                 Color.clear.frame(height: sessions.sessions.count > 1 ? 100 : 56)
-                TerminalScreen(session: session, fontSize: fontSize)
+                TerminalScreen(session: session, fontSize: $fontSize)
                     .padding(.horizontal, 4)
             }
 
@@ -125,8 +125,8 @@ struct SessionView: View {
                     }
                     Divider()
                     Button("Neu verbinden", systemImage: "arrow.clockwise") { session.reconnect() }
-                    Button("Schrift größer", systemImage: "textformat.size.larger") { fontSize = min(fontSize + 1, 24) }
-                    Button("Schrift kleiner", systemImage: "textformat.size.smaller") { fontSize = max(fontSize - 1, 8) }
+                    Button("Schrift größer", systemImage: "textformat.size.larger") { fontSize = min(fontSize + 1, TerminalScreen.maxFontSize) }
+                    Button("Schrift kleiner", systemImage: "textformat.size.smaller") { fontSize = max(fontSize - 1, TerminalScreen.minFontSize) }
                     Button("Farbschema", systemImage: "paintpalette") { showThemes = true }
                     Divider()
                     Button("Trennen", systemImage: "xmark.circle", role: .destructive) { sessions.close(session) }
