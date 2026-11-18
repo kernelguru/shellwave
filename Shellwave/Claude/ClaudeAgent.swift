@@ -505,7 +505,7 @@ final class ClaudeAgent: ObservableObject {
             }
             for _ in 0..<25 {
                 try Task.checkCancellation()
-                let response = try await callGemini()
+                let response = try await callGeminiWithRetry()
                 guard let candidates = response["candidates"] as? [[String: Any]],
                       let content = candidates.first?["content"] as? [String: Any],
                       let parts = content["parts"] as? [[String: Any]] else {
@@ -553,12 +553,52 @@ final class ClaudeAgent: ObservableObject {
         }
     }
 
-    private func callGemini() async throws -> [String: Any] {
-        let model = settings.geminiModel.trimmed.isEmpty ? "gemini-3.8-flash" : settings.geminiModel.trimmed
+    /// Gemini ist in der Gratis-Stufe oft überlastet (503/429). Dann mit Pause erneut versuchen
+    /// und notfalls auf ältere Flash-Modelle ausweichen, die weniger gefragt sind.
+    private func callGeminiWithRetry() async throws -> [String: Any] {
+        let primary = settings.geminiModel.trimmed.isEmpty ? "gemini-3.8-flash" : settings.geminiModel.trimmed
+        var models = [primary]
+        for fallback in ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"] where !models.contains(fallback) {
+            models.append(fallback)
+        }
+
+        var lastError: Error = ClaudeError.gemini("Keine Antwort")
+        for (index, model) in models.enumerated() {
+            for (attempt, delay) in [0, 3, 8].enumerated() {
+                if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+                do {
+                    let result = try await callGemini(model: model)
+                    if index > 0 {
+                        items.append(ChatItem(id: UUID().uuidString, kind: .notice("\(primary) ist überlastet – Antwort kam von \(model).")))
+                    }
+                    return result
+                } catch GeminiFailure.overloaded(let message) {
+                    lastError = ClaudeError.gemini(message)
+                    if attempt == 0 && index == 0 {
+                        items.append(ChatItem(id: UUID().uuidString, kind: .notice("Gemini ist gerade überlastet, versuche es erneut …")))
+                    }
+                    continue
+                } catch GeminiFailure.unknownModel {
+                    break   // Modell gibt es (für diesen Schlüssel) nicht: nächstes versuchen
+                } catch let error as URLError where error.code == .timedOut {
+                    lastError = ClaudeError.gemini("Zeitüberschreitung")
+                    continue
+                }
+            }
+        }
+        throw lastError
+    }
+
+    private enum GeminiFailure: Error {
+        case overloaded(String)
+        case unknownModel
+    }
+
+    private func callGemini(model: String) async throws -> [String: Any] {
         let encoded = model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? model
         var req = URLRequest(
             url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(encoded):generateContent")!,
-            timeoutInterval: 120
+            timeoutInterval: 90
         )
         req.httpMethod = "POST"
         req.setValue(settings.geminiKey, forHTTPHeaderField: "x-goog-api-key")
@@ -583,7 +623,11 @@ final class ClaudeAgent: ObservableObject {
         let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             let message = ((json["error"] as? [String: Any])?["message"] as? String) ?? "HTTP \(http.statusCode)"
-            throw ClaudeError.gemini(message)
+            switch http.statusCode {
+            case 429, 500, 503, 504: throw GeminiFailure.overloaded(message)
+            case 404: throw GeminiFailure.unknownModel
+            default: throw ClaudeError.gemini(message)
+            }
         }
         return json
     }
