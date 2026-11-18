@@ -101,14 +101,22 @@ final class CertificateManager: ObservableObject {
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.dateFormat = "yyyyMMdd-HHmm"
         let stamp = fmt.string(from: .now)
-        let request = SignRequest(
+        var request = SignRequest(
             caID: settings.caID,
             principals: principals,
             validitySeconds: settings.validitySeconds,
-            keyID: "\(DeviceKey.deviceSlug)-\(stamp)",
+            keyID: Self.caSetsKeyID(settings.caID) ? "" : "\(DeviceKey.deviceSlug)-\(stamp)",
             descr: "Shellwave \(DeviceKey.deviceSlug)"
         )
-        let issued = try await client.sign(publicKey: key.publicKeyLine, request: request)
+        let issued: SSHCertificate
+        do {
+            issued = try await client.sign(publicKey: key.publicKeyLine, request: request)
+        } catch UCMError.http(let status, let message) where status == 400 && !request.keyID.isEmpty && Self.isKeyIDRejection(message) {
+            // Die CA vergibt die Key-ID selbst: ohne key_id erneut anfragen und das für diese CA merken.
+            Self.setCASetsKeyID(settings.caID)
+            request.keyID = ""
+            issued = try await client.sign(publicKey: key.publicKeyLine, request: request)
+        }
 
         var line = issued.certificate?.trimmed ?? ""
         if line.isEmpty {
@@ -121,6 +129,25 @@ final class CertificateManager: ObservableObject {
         certificates[Self.slot(for: principals)] = stored
         persist()
         return stored
+    }
+
+    // MARK: CAs, die die Key-ID selbst setzen
+
+    private static let keyIDKey = "ucm.casSettingKeyID"
+
+    static func caSetsKeyID(_ caID: Int) -> Bool {
+        (UserDefaults.standard.array(forKey: keyIDKey) as? [Int] ?? []).contains(caID)
+    }
+
+    static func setCASetsKeyID(_ caID: Int) {
+        var list = UserDefaults.standard.array(forKey: keyIDKey) as? [Int] ?? []
+        if !list.contains(caID) { list.append(caID) }
+        UserDefaults.standard.set(list, forKey: keyIDKey)
+    }
+
+    static func isKeyIDRejection(_ message: String) -> Bool {
+        let m = message.lowercased()
+        return m.contains("key id") || m.contains("key_id")
     }
 
     /// Importiert ein extern signiertes `-cert.pub` (z. B. aus ucm-remote).
