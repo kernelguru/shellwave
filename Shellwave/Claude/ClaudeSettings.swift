@@ -12,9 +12,31 @@ enum ClaudeMode: String, CaseIterable, Identifiable {
 
 /// Anbieter für den Modus „API aus der App“.
 enum APIProvider: String, CaseIterable, Identifiable {
-    case anthropic, google
+    case anthropic, google, openAICompatible
     var id: String { rawValue }
-    var label: String { self == .anthropic ? "Claude (Anthropic)" : "Gemini (Google)" }
+    var label: String {
+        switch self {
+        case .anthropic: return "Claude (Anthropic)"
+        case .google: return "Gemini (Google)"
+        case .openAICompatible: return "OpenAI-kompatibel"
+        }
+    }
+}
+
+/// Vorlagen für den OpenAI-kompatiblen Anbieter.
+struct OpenAIPreset: Identifiable {
+    let id: String
+    let name: String
+    let baseURL: String
+    let model: String
+    let needsKey: Bool
+
+    static let all: [OpenAIPreset] = [
+        OpenAIPreset(id: "groq", name: "Groq", baseURL: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile", needsKey: true),
+        OpenAIPreset(id: "mistral", name: "Mistral", baseURL: "https://api.mistral.ai/v1", model: "mistral-small-latest", needsKey: true),
+        OpenAIPreset(id: "openrouter", name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", model: "meta-llama/llama-3.3-70b-instruct:free", needsKey: true),
+        OpenAIPreset(id: "ollama", name: "Ollama (eigener Server)", baseURL: "http://192.168.1.10:11434/v1", model: "qwen3:8b", needsKey: false),
+    ]
 }
 
 @MainActor
@@ -33,6 +55,20 @@ final class ClaudeSettings: ObservableObject {
     var apiProvider: APIProvider {
         get { APIProvider(rawValue: apiProviderRaw) ?? .anthropic }
         set { apiProviderRaw = newValue.rawValue }
+    }
+
+    @AppStorage("openai.baseURL") var openAIBaseURL: String = "https://api.groq.com/openai/v1"
+    @AppStorage("openai.model") var openAIModel: String = "llama-3.3-70b-versatile"
+    @Published var openAIKey: String = KeychainStore.string(service: "openai", account: "apikey")
+
+    func saveOpenAIKey(_ key: String) {
+        openAIKey = key.trimmed
+        KeychainStore.setString(openAIKey, service: "openai", account: "apikey")
+    }
+
+    func apply(_ preset: OpenAIPreset) {
+        openAIBaseURL = preset.baseURL
+        openAIModel = preset.model
     }
 
     func saveGeminiKey(_ key: String) {

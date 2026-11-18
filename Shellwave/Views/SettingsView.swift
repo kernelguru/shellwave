@@ -169,6 +169,7 @@ struct ClaudeSettingsSection: View {
     @State private var keyDraft = ""
 
     private var usesGemini: Bool { claude.mode == .api && claude.apiProvider == .google }
+    private var usesOpenAI: Bool { claude.mode == .api && claude.apiProvider == .openAICompatible }
 
     var body: some View {
         Section {
@@ -181,7 +182,32 @@ struct ClaudeSettingsSection: View {
                 }
             }
 
-            if usesGemini {
+            if usesOpenAI {
+                Menu {
+                    ForEach(OpenAIPreset.all) { preset in
+                        Button(preset.name) { claude.apply(preset) }
+                    }
+                } label: {
+                    Label("Vorlage übernehmen", systemImage: "list.bullet.rectangle")
+                }
+                TextField("Basis-URL (…/v1)", text: $claude.openAIBaseURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .font(.body.monospaced())
+                TextField("Modell", text: $claude.openAIModel)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+                SecureField(claude.openAIKey.isEmpty ? "API-Schlüssel (bei Ollama leer lassen)" : "Schlüssel (gespeichert)", text: $keyDraft)
+                    .onSubmit(save)
+                if !keyDraft.isEmpty {
+                    Button("Schlüssel sichern", systemImage: "key.fill", action: save)
+                }
+                if !claude.openAIKey.isEmpty {
+                    Button("Schlüssel entfernen", role: .destructive) { claude.saveOpenAIKey("") }
+                }
+            } else if usesGemini {
                 SecureField(claude.geminiKey.isEmpty ? "Gemini-API-Schlüssel" : "Gemini-Schlüssel (gespeichert)", text: $keyDraft)
                     .onSubmit(save)
                 if !keyDraft.isEmpty {
@@ -221,6 +247,8 @@ struct ClaudeSettingsSection: View {
         switch claude.mode {
         case .claudeCode:
             return "Claude Code läuft auf dem Server (Installation über „Server einrichten“, Login einmal mit `claude auth login`). Ohne übergebenen Schlüssel nutzt es dein Claude-Abo."
+        case .api where claude.apiProvider == .openAICompatible:
+            return "Jeder Dienst mit OpenAI-Format: Groq, Mistral, OpenRouter oder dein eigenes Ollama. Das Modell muss Werkzeugaufrufe (Tool Calling) beherrschen. Gratis-Stufen sind begrenzt; Datenschutz je nach Anbieter prüfen."
         case .api where claude.apiProvider == .google:
             return "Gemini über die API: Schlüssel kostenlos in Google AI Studio. Achtung: In der Gratis-Stufe darf Google Anfragen zur Verbesserung seiner Produkte nutzen – also auch Befehle und Terminal-Ausgaben."
         case .api:
@@ -230,7 +258,9 @@ struct ClaudeSettingsSection: View {
 
     private func save() {
         guard !keyDraft.trimmed.isEmpty else { return }
-        if usesGemini {
+        if usesOpenAI {
+            claude.saveOpenAIKey(keyDraft)
+        } else if usesGemini {
             claude.saveGeminiKey(keyDraft)
         } else {
             claude.saveAPIKey(keyDraft)

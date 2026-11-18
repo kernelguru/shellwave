@@ -91,11 +91,23 @@ struct ClaudePanel: View {
     }
 
     private var usesGemini: Bool { settings.mode == .api && settings.apiProvider == .google }
-    private var assistantName: String { usesGemini ? "Gemini" : "Claude" }
+    private var assistantName: String {
+        guard settings.mode == .api else { return "Claude" }
+        switch settings.apiProvider {
+        case .anthropic: return "Claude"
+        case .google: return "Gemini"
+        case .openAICompatible: return "Assistent"
+        }
+    }
     private var modeText: String {
         switch settings.mode {
         case .claudeCode: return "Claude Code"
-        case .api: return usesGemini ? "Gemini-API" : "Claude-API"
+        case .api:
+            switch settings.apiProvider {
+            case .anthropic: return "Claude-API"
+            case .google: return "Gemini-API"
+            case .openAICompatible: return settings.openAIModel
+            }
         }
     }
 

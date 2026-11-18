@@ -64,6 +64,8 @@ final class ClaudeAgent: ObservableObject {
     private var apiMessages: [[String: Any]] = []
     /// Verlauf im Gemini-Format (getrennt, weil die Formate verschieden sind)
     private var geminiContents: [[String: Any]] = []
+    /// Verlauf im OpenAI-Chat-Format (Groq, Mistral, OpenRouter, Ollama …)
+    private var openAIMessages: [[String: Any]] = []
     private var apiTask: Task<Void, Never>?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
 
@@ -88,6 +90,7 @@ final class ClaudeAgent: ObservableObject {
             modeInUse = .api
             apiMessages.append(["role": "user", "content": prompt])
             geminiContents.append(["role": "user", "parts": [["text": prompt]]])
+            openAIMessages.append(["role": "user", "content": prompt])
             runAPILoop()
         }
     }
@@ -127,6 +130,7 @@ final class ClaudeAgent: ObservableObject {
         items = []
         apiMessages = []
         geminiContents = []
+        openAIMessages = []
         didSendContext = false
         ClaudeSessionIDs.set(nil, for: session.host.id)
     }
@@ -405,6 +409,7 @@ final class ClaudeAgent: ObservableObject {
             switch provider {
             case .anthropic: await self?.apiLoop()
             case .google: await self?.geminiLoop()
+            case .openAICompatible: await self?.openAILoop()
             }
             self?.apiTask = nil
         }
@@ -489,6 +494,144 @@ final class ClaudeAgent: ObservableObject {
         jeder schreibende Befehl muss vom Benutzer freigegeben werden. Prüfe erst den Zustand, dann ändere. \
         Antworte knapp auf Deutsch.
         """
+    }
+
+    // MARK: OpenAI-kompatibel (Groq, Mistral, OpenRouter, Ollama …)
+
+    private func openAILoop() async {
+        let base = settings.openAIBaseURL.trimmed
+        guard !base.isEmpty, URL(string: base) != nil else {
+            items.append(ChatItem(id: UUID().uuidString, kind: .error("Keine Basis-URL für den OpenAI-kompatiblen Anbieter gesetzt (Einstellungen → Assistent).")))
+            return
+        }
+        status = .working
+        do {
+            if client == nil {
+                client = try await SSHConnector.connect(to: session.host, certificates: session.certificates, hosts: session.hosts)
+            }
+            for _ in 0..<25 {
+                try Task.checkCancellation()
+                let response = try await callOpenAIWithRetry()
+                guard let choices = response["choices"] as? [[String: Any]],
+                      let message = choices.first?["message"] as? [String: Any] else { break }
+
+                let content = Self.text(of: message["content"])
+                let toolCalls = message["tool_calls"] as? [[String: Any]] ?? []
+
+                // Antwort für den Verlauf nachbauen (nur die Felder, die die API zurück erwartet)
+                let contentValue: Any
+                if content.isEmpty && !toolCalls.isEmpty { contentValue = NSNull() } else { contentValue = content }
+                var assistant: [String: Any] = ["role": "assistant", "content": contentValue]
+                if !toolCalls.isEmpty { assistant["tool_calls"] = toolCalls }
+                openAIMessages.append(assistant)
+
+                if !content.trimmed.isEmpty {
+                    items.append(ChatItem(id: UUID().uuidString, kind: .assistant(content)))
+                }
+                if toolCalls.isEmpty { break }
+
+                for call in toolCalls {
+                    let id = call["id"] as? String ?? UUID().uuidString
+                    let function = call["function"] as? [String: Any] ?? [:]
+                    let name = function["name"] as? String ?? "run_command"
+                    var args: [String: Any] = [:]
+                    if let raw = function["arguments"] as? String, let data = raw.data(using: .utf8),
+                       let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        args = parsed
+                    } else if let parsed = function["arguments"] as? [String: Any] {
+                        args = parsed
+                    }
+                    let command = args["command"] as? String ?? ""
+                    items.append(ChatItem(id: id, kind: .tool(name: name, summary: command, output: "", done: false, failed: false)))
+
+                    let resultText: String
+                    if name != "run_command" || command.isEmpty {
+                        finishTool(id: id, output: "Unbekanntes Werkzeug", failed: true)
+                        resultText = "Unbekanntes Werkzeug oder leerer Befehl. Nutze run_command mit dem Feld command."
+                    } else if let result = try await executeTool(id: id, command: command, input: args) {
+                        resultText = "exit code \(result.exitCode)\n\(String(result.output.suffix(12000)))"
+                    } else {
+                        resultText = "Der Benutzer hat diesen Befehl abgelehnt."
+                    }
+                    openAIMessages.append(["role": "tool", "tool_call_id": id, "content": resultText])
+                }
+            }
+            status = .ready
+        } catch is CancellationError {
+            status = .ready
+        } catch {
+            status = .failed(TerminalSession.describe(error))
+            items.append(ChatItem(id: UUID().uuidString, kind: .error(TerminalSession.describe(error))))
+        }
+    }
+
+    private func callOpenAIWithRetry() async throws -> [String: Any] {
+        var lastError: Error = ClaudeError.openAI("Keine Antwort")
+        for (attempt, delay) in [0, 3, 8, 15].enumerated() {
+            if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+            do {
+                return try await callOpenAI()
+            } catch OpenAIFailure.busy(let message) {
+                lastError = ClaudeError.openAI(message)
+                if attempt == 0 {
+                    items.append(ChatItem(id: UUID().uuidString, kind: .notice("Anbieter ausgelastet oder Limit erreicht, versuche es erneut …")))
+                }
+            }
+        }
+        throw lastError
+    }
+
+    private enum OpenAIFailure: Error {
+        case busy(String)
+    }
+
+    private func callOpenAI() async throws -> [String: Any] {
+        var base = settings.openAIBaseURL.trimmed
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: base + "/chat/completions") else { throw ClaudeError.openAI("Ungültige Basis-URL") }
+
+        var req = URLRequest(url: url, timeoutInterval: 180)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        if !settings.openAIKey.isEmpty {
+            req.setValue("Bearer \(settings.openAIKey)", forHTTPHeaderField: "authorization")
+        }
+        // OpenRouter wertet diese Angaben für die Zuordnung aus; andere ignorieren sie.
+        req.setValue("https://github.com/kernelguru/shellwave", forHTTPHeaderField: "HTTP-Referer")
+        req.setValue("Shellwave", forHTTPHeaderField: "X-Title")
+
+        let body: [String: Any] = [
+            "model": settings.openAIModel.trimmed,
+            "messages": [["role": "system", "content": systemPrompt]] + openAIMessages,
+            "tools": [[
+                "type": "function",
+                "function": [
+                    "name": "run_command",
+                    "description": "Führt einen Shell-Befehl auf dem Server aus (nicht interaktiv) und liefert Exit-Code und Ausgabe.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": ["command": ["type": "string", "description": "Der auszuführende Befehl"]],
+                        "required": ["command"],
+                    ],
+                ],
+            ]],
+            "tool_choice": "auto",
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let errorObj = json["error"]
+            let message = ((errorObj as? [String: Any])?["message"] as? String)
+                ?? (errorObj as? String)
+                ?? String(data: data.prefix(300), encoding: .utf8)
+                ?? "HTTP \(http.statusCode)"
+            switch http.statusCode {
+            case 429, 500, 502, 503, 504: throw OpenAIFailure.busy(message)
+            default: throw ClaudeError.openAI("HTTP \(http.statusCode): \(message)")
+            }
+        }
+        return json
     }
 
     // MARK: Google Gemini (optional)
@@ -734,12 +877,14 @@ enum ClaudeError: LocalizedError {
     case channelFailed
     case api(String)
     case gemini(String)
+    case openAI(String)
 
     var errorDescription: String? {
         switch self {
         case .channelFailed: return "Kanal zu Claude Code konnte nicht geöffnet werden."
         case .api(let m): return "Claude-API: \(m)"
         case .gemini(let m): return "Gemini-API: \(m)"
+        case .openAI(let m): return "API: \(m)"
         }
     }
 }
