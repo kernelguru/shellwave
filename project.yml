@@ -20,6 +20,9 @@ packages:
     from: 2.81.0
   MoshKit:
     path: Packages/MoshKit
+  Yams:
+    url: https://github.com/jpsim/Yams
+    from: 6.2.0
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -43,6 +46,7 @@ targets:
       - package: swift-nio
         product: NIOCore
       - package: MoshKit
+      - package: Yams
       - target: ShellwaveWidgets
         embed: true
     scheme: {}

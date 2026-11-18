@@ -131,6 +131,58 @@ final class SFTPModel: ObservableObject {
         await list(parent.isEmpty ? "/" : parent)
     }
 
+    // MARK: Textdateien für den Editor
+
+    /// Liest eine Datei komplett (für Dateien bis 2 MB).
+    func readData(at path: String, limit: UInt64 = 2 * 1024 * 1024) async throws -> Data {
+        guard let sftp else { throw EditorError.notConnected }
+        let handle = try await sftp.openFile(filePath: path, flags: .read)
+        var data = Data()
+        var offset: UInt64 = 0
+        while true {
+            let buffer = try await handle.read(from: offset, length: 32 * 1024)
+            if buffer.readableBytes == 0 { break }
+            data.append(contentsOf: buffer.readableBytesView)
+            offset += UInt64(buffer.readableBytes)
+            if offset > limit {
+                try? await handle.close()
+                throw EditorError.tooLarge
+            }
+        }
+        try await handle.close()
+        return data
+    }
+
+    func readText(at path: String) async throws -> String {
+        let data = try await readData(at: path)
+        guard let text = String(data: data, encoding: .utf8) else { throw EditorError.notText }
+        return text
+    }
+
+    /// Schreibt Text in eine Datei (überschreibt sie).
+    func writeText(_ text: String, to path: String) async throws {
+        guard let sftp else { throw EditorError.notConnected }
+        let data = Data(text.utf8)
+        let handle = try await sftp.openFile(filePath: path, flags: [.write, .create, .truncate])
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + 32 * 1024, data.count)
+            try await handle.write(ByteBuffer(bytes: data[offset..<end]), at: UInt64(offset))
+            offset = end
+        }
+        try await handle.close()
+    }
+
+    func removeFile(at path: String) async {
+        try? await sftp?.remove(at: path)
+    }
+
+    /// Befehl über dieselbe SSH-Verbindung ausführen (z. B. `docker compose config`).
+    func run(_ command: String) async throws -> (output: String, exitCode: Int) {
+        guard let client else { throw EditorError.notConnected }
+        return try await SSHConnector.runCapturing(command, on: client)
+    }
+
     /// Lädt eine Datei in einen temporären Ordner und liefert die lokale URL.
     func download(_ file: RemoteFile) async -> URL? {
         guard let sftp else { return nil }
@@ -227,6 +279,18 @@ final class SFTPModel: ObservableObject {
     }
 }
 
+enum EditorError: LocalizedError {
+    case notConnected, tooLarge, notText
+
+    var errorDescription: String? {
+        switch self {
+        case .notConnected: return "Keine SFTP-Verbindung."
+        case .tooLarge: return "Die Datei ist größer als 2 MB und wird nicht im Editor geöffnet."
+        case .notText: return "Das ist keine UTF-8-Textdatei."
+        }
+    }
+}
+
 struct SFTPBrowserView: View {
     @StateObject private var model: SFTPModel
     @Environment(\.dismiss) private var dismiss
@@ -236,6 +300,7 @@ struct SFTPBrowserView: View {
     @State private var showNewFolder = false
     @State private var renaming: RemoteFile?
     @State private var renameText = ""
+    @State private var editing: RemoteFile?
 
     init(host: Host, certificates: CertificateManager, hosts: HostStore) {
         _model = StateObject(wrappedValue: SFTPModel(host: host, certificates: certificates, hosts: hosts))
@@ -256,6 +321,8 @@ struct SFTPBrowserView: View {
                     Task {
                         if file.isDirectory || file.isLink {
                             await model.enter(file)
+                        } else if ConfigLanguage.isEditable(filename: file.name) {
+                            editing = file
                         } else if let url = await model.download(file) {
                             shareURL = url
                         }
@@ -282,6 +349,16 @@ struct SFTPBrowserView: View {
                     }
                 }
                 .tint(.primary)
+                .swipeActions(edge: .leading) {
+                    if !file.isDirectory {
+                        Button("Teilen", systemImage: "square.and.arrow.up") {
+                            Task { if let url = await model.download(file) { shareURL = url } }
+                        }
+                        .tint(.blue)
+                        Button("Bearbeiten", systemImage: "pencil.line") { editing = file }
+                            .tint(Theme.teal)
+                    }
+                }
                 .swipeActions {
                     Button("Löschen", systemImage: "trash", role: .destructive) {
                         Task { await model.delete(file) }
@@ -331,6 +408,9 @@ struct SFTPBrowserView: View {
         }
         .sheet(item: $shareURL) { url in
             ShareSheet(items: [url])
+        }
+        .fullScreenCover(item: $editing) { file in
+            NavigationStack { ConfigEditorView(model: model, file: file) }
         }
         .alert("Neuer Ordner", isPresented: $showNewFolder) {
             TextField("Name", text: $newFolder)
