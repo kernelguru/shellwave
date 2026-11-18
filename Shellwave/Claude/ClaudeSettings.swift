@@ -7,7 +7,14 @@ enum ClaudeMode: String, CaseIterable, Identifiable {
     /// Die App spricht direkt mit der Claude-API und führt Befehle per SSH aus
     case api
     var id: String { rawValue }
-    var label: String { self == .claudeCode ? "Claude Code auf dem Server" : "Claude-API aus der App" }
+    var label: String { self == .claudeCode ? "Claude Code auf dem Server" : "API aus der App" }
+}
+
+/// Anbieter für den Modus „API aus der App“.
+enum APIProvider: String, CaseIterable, Identifiable {
+    case anthropic, google
+    var id: String { rawValue }
+    var label: String { self == .anthropic ? "Claude (Anthropic)" : "Gemini (Google)" }
 }
 
 @MainActor
@@ -19,6 +26,19 @@ final class ClaudeSettings: ObservableObject {
     /// API-Key auch an Claude Code auf dem Server weitergeben (sonst nutzt der Server sein eigenes Login)
     @AppStorage("claude.passKeyToServer") var passKeyToServer: Bool = false
     @Published var apiKey: String = KeychainStore.string(service: "claude", account: "apikey")
+    @AppStorage("assistant.apiProvider") var apiProviderRaw: String = APIProvider.anthropic.rawValue
+    @AppStorage("gemini.model") var geminiModel: String = "gemini-3.8-flash"
+    @Published var geminiKey: String = KeychainStore.string(service: "gemini", account: "apikey")
+
+    var apiProvider: APIProvider {
+        get { APIProvider(rawValue: apiProviderRaw) ?? .anthropic }
+        set { apiProviderRaw = newValue.rawValue }
+    }
+
+    func saveGeminiKey(_ key: String) {
+        geminiKey = key.trimmed
+        KeychainStore.setString(geminiKey, service: "gemini", account: "apikey")
+    }
 
     var mode: ClaudeMode {
         get { ClaudeMode(rawValue: modeRaw) ?? .claudeCode }

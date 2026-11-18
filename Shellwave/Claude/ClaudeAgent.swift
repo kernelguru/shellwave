@@ -62,6 +62,8 @@ final class ClaudeAgent: ObservableObject {
 
     // API
     private var apiMessages: [[String: Any]] = []
+    /// Verlauf im Gemini-Format (getrennt, weil die Formate verschieden sind)
+    private var geminiContents: [[String: Any]] = []
     private var apiTask: Task<Void, Never>?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
 
@@ -85,6 +87,7 @@ final class ClaudeAgent: ObservableObject {
         case .api:
             modeInUse = .api
             apiMessages.append(["role": "user", "content": prompt])
+            geminiContents.append(["role": "user", "parts": [["text": prompt]]])
             runAPILoop()
         }
     }
@@ -123,6 +126,7 @@ final class ClaudeAgent: ObservableObject {
         stop()
         items = []
         apiMessages = []
+        geminiContents = []
         didSendContext = false
         ClaudeSessionIDs.set(nil, for: session.host.id)
     }
@@ -396,15 +400,19 @@ final class ClaudeAgent: ObservableObject {
 
     private func runAPILoop() {
         guard apiTask == nil else { return }
+        let provider = settings.apiProvider
         apiTask = Task { [weak self] in
-            await self?.apiLoop()
+            switch provider {
+            case .anthropic: await self?.apiLoop()
+            case .google: await self?.geminiLoop()
+            }
             self?.apiTask = nil
         }
     }
 
     private func apiLoop() async {
         guard !settings.apiKey.isEmpty else {
-            items.append(ChatItem(id: UUID().uuidString, kind: .error("Kein Claude-API-Schlüssel gesetzt (Einstellungen → Claude).")))
+            items.append(ChatItem(id: UUID().uuidString, kind: .error("Kein Claude-API-Schlüssel gesetzt (Einstellungen → Assistent).")))
             return
         }
         status = .working
@@ -431,21 +439,13 @@ final class ClaudeAgent: ObservableObject {
                         let command = input["command"] as? String ?? ""
                         items.append(ChatItem(id: id, kind: .tool(name: "run_command", summary: command, output: "", done: false, failed: false)))
 
-                        var allowed = settings.autoApproveReadOnly && ReadOnlyPolicy.isReadOnly(command: command)
-                        if !allowed {
-                            let request = ApprovalRequest(id: id, tool: "run_command", summary: command, detail: command, rawInput: Self.hashable(input))
-                            allowed = await waitForApproval(request)
-                        }
-                        if allowed, let client {
-                            let result = try await SSHConnector.runCapturing(command, on: client)
-                            let output = ANSIStripper.strip(result.output)
-                            finishTool(id: id, output: output, failed: result.exitCode != 0)
+                        let result = try await executeTool(id: id, command: command, input: input)
+                        if let result {
                             toolResults.append([
                                 "type": "tool_result", "tool_use_id": id,
-                                "content": "exit code \(result.exitCode)\n\(String(output.suffix(12000)))",
+                                "content": "exit code \(result.exitCode)\n\(String(result.output.suffix(12000)))",
                             ])
                         } else {
-                            finishTool(id: id, output: "Abgelehnt", failed: true)
                             toolResults.append(["type": "tool_result", "tool_use_id": id, "content": "Der Benutzer hat diesen Befehl abgelehnt.", "is_error": true])
                         }
                     default:
@@ -465,6 +465,129 @@ final class ClaudeAgent: ObservableObject {
         }
     }
 
+    /// Freigabe prüfen und Befehl per SSH ausführen. `nil` = vom Benutzer abgelehnt.
+    private func executeTool(id: String, command: String, input: [String: Any]) async throws -> (output: String, exitCode: Int)? {
+        var allowed = settings.autoApproveReadOnly && ReadOnlyPolicy.isReadOnly(command: command)
+        if !allowed {
+            let request = ApprovalRequest(id: id, tool: "run_command", summary: command, detail: command, rawInput: Self.hashable(input))
+            allowed = await waitForApproval(request)
+        }
+        guard allowed, let client else {
+            finishTool(id: id, output: "Abgelehnt", failed: true)
+            return nil
+        }
+        let result = try await SSHConnector.runCapturing(command, on: client)
+        let output = ANSIStripper.strip(result.output)
+        finishTool(id: id, output: output, failed: result.exitCode != 0)
+        return (output, result.exitCode)
+    }
+
+    private var systemPrompt: String {
+        """
+        Du bist ein Linux-Administrationsassistent in der iOS-App Shellwave und arbeitest auf dem Server \
+        \(session.host.displayName) (\(session.host.address)). Befehle führst du mit dem Werkzeug run_command aus; \
+        jeder schreibende Befehl muss vom Benutzer freigegeben werden. Prüfe erst den Zustand, dann ändere. \
+        Antworte knapp auf Deutsch.
+        """
+    }
+
+    // MARK: Google Gemini (optional)
+
+    private func geminiLoop() async {
+        guard !settings.geminiKey.isEmpty else {
+            items.append(ChatItem(id: UUID().uuidString, kind: .error("Kein Gemini-API-Schlüssel gesetzt (Einstellungen → Assistent).")))
+            return
+        }
+        status = .working
+        do {
+            if client == nil {
+                client = try await SSHConnector.connect(to: session.host, certificates: session.certificates, hosts: session.hosts)
+            }
+            for _ in 0..<25 {
+                try Task.checkCancellation()
+                let response = try await callGemini()
+                guard let candidates = response["candidates"] as? [[String: Any]],
+                      let content = candidates.first?["content"] as? [String: Any],
+                      let parts = content["parts"] as? [[String: Any]] else {
+                    if let feedback = response["promptFeedback"] as? [String: Any], let reason = feedback["blockReason"] as? String {
+                        throw ClaudeError.api("Gemini hat die Anfrage blockiert (\(reason)).")
+                    }
+                    break
+                }
+                // Antwort unverändert in den Verlauf (enthält ggf. Thought Signatures, die Gemini zurück braucht)
+                geminiContents.append(["role": "model", "parts": parts])
+
+                var responses: [[String: Any]] = []
+                for part in parts {
+                    if let text = part["text"] as? String, (part["thought"] as? Bool) != true, !text.trimmed.isEmpty {
+                        items.append(ChatItem(id: UUID().uuidString, kind: .assistant(text)))
+                    }
+                    if let call = part["functionCall"] as? [String: Any] {
+                        let name = call["name"] as? String ?? "run_command"
+                        let args = call["args"] as? [String: Any] ?? [:]
+                        let callID = call["id"] as? String
+                        let id = callID ?? UUID().uuidString
+                        let command = args["command"] as? String ?? ""
+                        items.append(ChatItem(id: id, kind: .tool(name: name, summary: command, output: "", done: false, failed: false)))
+
+                        var payload: [String: Any] = ["name": name]
+                        if let callID { payload["id"] = callID }
+                        if let result = try await executeTool(id: id, command: command, input: args) {
+                            payload["response"] = ["exit_code": result.exitCode, "output": String(result.output.suffix(12000))]
+                        } else {
+                            payload["response"] = ["error": "Der Benutzer hat diesen Befehl abgelehnt."]
+                        }
+                        responses.append(["functionResponse": payload])
+                    }
+                }
+
+                if responses.isEmpty { break }
+                geminiContents.append(["role": "user", "parts": responses])
+            }
+            status = .ready
+        } catch is CancellationError {
+            status = .ready
+        } catch {
+            status = .failed(TerminalSession.describe(error))
+            items.append(ChatItem(id: UUID().uuidString, kind: .error(TerminalSession.describe(error))))
+        }
+    }
+
+    private func callGemini() async throws -> [String: Any] {
+        let model = settings.geminiModel.trimmed.isEmpty ? "gemini-3.8-flash" : settings.geminiModel.trimmed
+        let encoded = model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? model
+        var req = URLRequest(
+            url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(encoded):generateContent")!,
+            timeoutInterval: 120
+        )
+        req.httpMethod = "POST"
+        req.setValue(settings.geminiKey, forHTTPHeaderField: "x-goog-api-key")
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        let body: [String: Any] = [
+            "systemInstruction": ["parts": [["text": systemPrompt]]],
+            "contents": geminiContents,
+            "tools": [[
+                "functionDeclarations": [[
+                    "name": "run_command",
+                    "description": "Führt einen Shell-Befehl auf dem Server aus (nicht interaktiv) und liefert Exit-Code und Ausgabe.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": ["command": ["type": "string", "description": "Der auszuführende Befehl"]],
+                        "required": ["command"],
+                    ],
+                ]],
+            ]],
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let message = ((json["error"] as? [String: Any])?["message"] as? String) ?? "HTTP \(http.statusCode)"
+            throw ClaudeError.gemini(message)
+        }
+        return json
+    }
+
     private func waitForApproval(_ request: ApprovalRequest) async -> Bool {
         pending = request
         onApprovalChange?(request)
@@ -482,12 +605,7 @@ final class ClaudeAgent: ObservableObject {
         let body: [String: Any] = [
             "model": settings.model,
             "max_tokens": 4096,
-            "system": """
-            Du bist ein Linux-Administrationsassistent in der iOS-App Shellwave und arbeitest auf dem Server \
-            \(session.host.displayName) (\(session.host.address)). Befehle führst du mit dem Werkzeug run_command aus; \
-            jeder schreibende Befehl muss vom Benutzer freigegeben werden. Prüfe erst den Zustand, dann ändere. \
-            Antworte knapp auf Deutsch.
-            """,
+            "system": systemPrompt,
             "tools": [[
                 "name": "run_command",
                 "description": "Führt einen Shell-Befehl auf dem Server aus (nicht interaktiv) und liefert Exit-Code und Ausgabe.",
@@ -571,11 +689,13 @@ final class ClaudeAgent: ObservableObject {
 enum ClaudeError: LocalizedError {
     case channelFailed
     case api(String)
+    case gemini(String)
 
     var errorDescription: String? {
         switch self {
         case .channelFailed: return "Kanal zu Claude Code konnte nicht geöffnet werden."
         case .api(let m): return "Claude-API: \(m)"
+        case .gemini(let m): return "Gemini-API: \(m)"
         }
     }
 }

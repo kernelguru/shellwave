@@ -163,42 +163,78 @@ struct DeviceKeySection: View {
     }
 }
 
-/// Claude: Modus, API-Schlüssel, Modell und Freigaberegeln.
+/// Assistent: Modus, Anbieter, Schlüssel, Modell und Freigaberegeln.
 struct ClaudeSettingsSection: View {
     @EnvironmentObject private var claude: ClaudeSettings
     @State private var keyDraft = ""
+
+    private var usesGemini: Bool { claude.mode == .api && claude.apiProvider == .google }
 
     var body: some View {
         Section {
             Picker("Modus", selection: Binding(get: { claude.mode }, set: { claude.mode = $0 })) {
                 ForEach(ClaudeMode.allCases) { Text($0.label).tag($0) }
             }
-            SecureField(claude.apiKey.isEmpty ? "Claude-API-Schlüssel" : "API-Schlüssel (gespeichert)", text: $keyDraft)
-                .onSubmit(save)
-            if !keyDraft.isEmpty {
-                Button("API-Schlüssel sichern", systemImage: "key.fill", action: save)
+            if claude.mode == .api {
+                Picker("Anbieter", selection: Binding(get: { claude.apiProvider }, set: { claude.apiProvider = $0; keyDraft = "" })) {
+                    ForEach(APIProvider.allCases) { Text($0.label).tag($0) }
+                }
             }
-            TextField("Modell", text: $claude.model)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.body.monospaced())
+
+            if usesGemini {
+                SecureField(claude.geminiKey.isEmpty ? "Gemini-API-Schlüssel" : "Gemini-Schlüssel (gespeichert)", text: $keyDraft)
+                    .onSubmit(save)
+                if !keyDraft.isEmpty {
+                    Button("Gemini-Schlüssel sichern", systemImage: "key.fill", action: save)
+                }
+                TextField("Gemini-Modell", text: $claude.geminiModel)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+            } else {
+                SecureField(claude.apiKey.isEmpty ? "Claude-API-Schlüssel" : "Claude-Schlüssel (gespeichert)", text: $keyDraft)
+                    .onSubmit(save)
+                if !keyDraft.isEmpty {
+                    Button("Claude-Schlüssel sichern", systemImage: "key.fill", action: save)
+                }
+                if claude.mode == .api {
+                    TextField("Claude-Modell", text: $claude.model)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.body.monospaced())
+                }
+            }
+
             Toggle("Lesende Befehle ohne Rückfrage", isOn: $claude.autoApproveReadOnly)
             Toggle("Freigaben mit Face ID bestätigen", isOn: $claude.requireBiometrics)
             if claude.mode == .claudeCode {
                 Toggle("API-Schlüssel an Claude Code übergeben", isOn: $claude.passKeyToServer)
             }
         } header: {
-            Text("Claude")
+            Text("Assistent")
         } footer: {
-            Text(claude.mode == .claudeCode
-                 ? "Claude Code läuft auf dem Server (Installation über „Server einrichten“). Ohne übergebenen Schlüssel nutzt es das Login, das auf dem Server eingerichtet ist."
-                 : "Die App ruft die Claude-API direkt auf und führt Befehle per SSH aus. Dafür ist ein API-Schlüssel nötig.")
+            Text(footer)
+        }
+    }
+
+    private var footer: String {
+        switch claude.mode {
+        case .claudeCode:
+            return "Claude Code läuft auf dem Server (Installation über „Server einrichten“, Login einmal mit `claude auth login`). Ohne übergebenen Schlüssel nutzt es dein Claude-Abo."
+        case .api where claude.apiProvider == .google:
+            return "Gemini über die API: Schlüssel kostenlos in Google AI Studio. Achtung: In der Gratis-Stufe darf Google Anfragen zur Verbesserung seiner Produkte nutzen – also auch Befehle und Terminal-Ausgaben."
+        case .api:
+            return "Die App ruft die Claude-API direkt auf und führt Befehle per SSH aus. Abrechnung über Guthaben in der Claude Console, nicht über das Abo."
         }
     }
 
     private func save() {
         guard !keyDraft.trimmed.isEmpty else { return }
-        claude.saveAPIKey(keyDraft)
+        if usesGemini {
+            claude.saveGeminiKey(keyDraft)
+        } else {
+            claude.saveAPIKey(keyDraft)
+        }
         keyDraft = ""
     }
 }

@@ -23,7 +23,7 @@ struct ClaudePanel: View {
                         if agent.status == .working {
                             HStack(spacing: 8) {
                                 ProgressView().controlSize(.small)
-                                Text("Claude arbeitet …").font(.footnote).foregroundStyle(.secondary)
+                                Text("\(assistantName) arbeitet …").font(.footnote).foregroundStyle(.secondary)
                             }
                             .id("working")
                         }
@@ -53,13 +53,18 @@ struct ClaudePanel: View {
 
     private var header: some View {
         HStack {
-            Label("Claude", systemImage: "sparkles")
+            Label(assistantName, systemImage: "sparkles")
                 .font(.headline)
             statusText
             Spacer()
             Menu {
                 Picker("Modus", selection: Binding(get: { settings.mode }, set: { settings.mode = $0 })) {
                     ForEach(ClaudeMode.allCases) { Text($0.label).tag($0) }
+                }
+                if settings.mode == .api {
+                    Picker("Anbieter", selection: Binding(get: { settings.apiProvider }, set: { settings.apiProvider = $0 })) {
+                        ForEach(APIProvider.allCases) { Text($0.label).tag($0) }
+                    }
                 }
                 Button("Neue Unterhaltung", systemImage: "arrow.counterclockwise") { agent.reset() }
                 if agent.status == .working {
@@ -81,13 +86,22 @@ struct ClaudePanel: View {
         switch agent.status {
         case .connecting: Text("verbinde …").font(.caption).foregroundStyle(.secondary)
         case .failed: Text("Fehler").font(.caption).foregroundStyle(.red)
-        default: Text(settings.mode == .claudeCode ? "Claude Code" : "API").font(.caption).foregroundStyle(.secondary)
+        default: Text(modeText).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var usesGemini: Bool { settings.mode == .api && settings.apiProvider == .google }
+    private var assistantName: String { usesGemini ? "Gemini" : "Claude" }
+    private var modeText: String {
+        switch settings.mode {
+        case .claudeCode: return "Claude Code"
+        case .api: return usesGemini ? "Gemini-API" : "Claude-API"
         }
     }
 
     private var emptyHint: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Frag Claude nach diesem Server.").font(.subheadline.weight(.semibold))
+            Text("Frag \(assistantName) nach diesem Server.").font(.subheadline.weight(.semibold))
             Text("Zum Beispiel: „Warum startet der Jellyfin-Container nicht?“ oder „Installiere htop und zeig mir die Last.“ Lesende Befehle laufen direkt, alles andere wartet auf deine Freigabe.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -98,7 +112,7 @@ struct ClaudePanel: View {
 
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            TextField("Nachricht an Claude", text: $input, axis: .vertical)
+            TextField("Nachricht an \(assistantName)", text: $input, axis: .vertical)
                 .lineLimit(1...5)
                 .focused($focused)
                 .padding(.horizontal, 14)
