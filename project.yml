@@ -47,6 +47,8 @@ targets:
         product: NIOCore
       - package: MoshKit
       - package: Yams
+      - framework: poc/nbkit/NBKit.xcframework
+        embed: false
       - target: ShellwaveWidgets
         embed: true
     scheme: {}
@@ -87,6 +89,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.marck.shellwave
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        OTHER_LDFLAGS: "$(inherited) -lresolv"
   ShellwaveWidgets:
     type: app-extension
     platform: iOS

@@ -99,6 +99,18 @@ struct SettingsView: View {
 
             BackupSection()
 
+            Section {
+                NavigationLink {
+                    NetBirdTestView()
+                } label: {
+                    Label("NetBird (Test)", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+            } header: {
+                Text("Experimentell")
+            } footer: {
+                Text("Machbarkeitstest: NetBird eingebettet, Login über den eingebauten IdP, NetBird SSH.")
+            }
+
             Section("Über") {
                 LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–")
             }
