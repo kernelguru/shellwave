@@ -4,13 +4,13 @@ import NBKit
 import NIOCore
 import NIOSSH
 
-/// Machbarkeitstest: NetBird eingebettet (ohne VPN-Profil), Login über den eingebauten
-/// IdP (Device-Flow mit Client „netbird-cli“) und NetBird SSH mit dem Token als Passwort.
+/// Machbarkeitstest: NetBird eingebettet (ohne VPN-Profil). Der Login läuft über
+/// den originalen NetBird-Code (PKCE im Browser, Parameter vom Management-Server),
+/// NetBird SSH bekommt das Token als Passwort.
 @MainActor
 final class NetBirdManager: ObservableObject {
     enum State: Equatable {
         case idle
-        case loggingIn(userCode: String, url: URL)
         case starting
         case running
         case failed(String)
@@ -23,7 +23,17 @@ final class NetBirdManager: ObservableObject {
         let status: String
     }
 
+    /// Offener Browser-Login.
+    struct LoginPrompt: Identifiable, Equatable {
+        var id: URL { url }
+        let url: URL
+        let userCode: String
+    }
+
     static let shared = NetBirdManager()
+
+    /// So lange wird ein Token wiederverwendet (NetBird SSH akzeptiert höchstens 10 Minuten).
+    static let tokenCacheSeconds: TimeInterval = 300
 
     @Published var managementURL: String = UserDefaults.standard.string(forKey: "netbird.managementURL") ?? "" {
         didSet { UserDefaults.standard.set(managementURL, forKey: "netbird.managementURL") }
@@ -32,9 +42,15 @@ final class NetBirdManager: ObservableObject {
     @Published private(set) var log: [String] = []
     @Published private(set) var peers: [Peer] = []
     @Published private(set) var ownIP = ""
-    @Published private(set) var loggedIn = KeychainStore.get(service: "netbird", account: "refresh") != nil
-    /// Läuft gerade eine Anfrage an den IdP (Discovery, Device-Code, Token)?
+    /// Ist dieses Gerät schon als Peer registriert (Login über den Overlay-Start)?
+    @Published private(set) var peerRegistered = UserDefaults.standard.bool(forKey: "netbird.registered") {
+        didSet { UserDefaults.standard.set(peerRegistered, forKey: "netbird.registered") }
+    }
+    /// Läuft gerade ein Login (bis der Browser-Link da ist)?
     @Published private(set) var loginBusy = false
+    @Published var loginPrompt: LoginPrompt?
+    /// Bis wann das zwischengespeicherte Token benutzt wird.
+    @Published private(set) var tokenValidUntil: Date?
     /// Startzeitpunkt des Overlay-Starts, für den Zähler in der Ansicht.
     @Published private(set) var startingSince: Date?
     /// Absturzmeldung des Go-Teils aus dem letzten Lauf.
@@ -43,19 +59,10 @@ final class NetBirdManager: ObservableObject {
     @Published private(set) var goLog = ""
 
     private var node: NbkitNode?
-    private var accessToken: String?
+    private var token: String?
+    private var tokenTask: Task<String, Error>?
     private var proxies: [String: Int] = [:]
-    private var loginTask: Task<Void, Never>?
     private let pending = PendingNode()
-
-    /// Kurze Zeitlimits, damit ein hängender IdP sofort auffällt.
-    private let session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 30
-        config.waitsForConnectivity = false
-        return URLSession(configuration: config)
-    }()
 
     static var directory: URL {
         JSONFile.directory.appendingPathComponent("netbird", isDirectory: true)
@@ -69,8 +76,12 @@ final class NetBirdManager: ObservableObject {
         if let text = try? String(contentsOf: Self.appLogURL, encoding: .utf8) {
             log = text.split(separator: "\n").suffix(150).map(String.init)
         }
+        // Alte Daten aus dem eigenen Device-Flow entfernen
+        KeychainStore.delete(service: "netbird", account: "refresh")
         loadDiagnostics()
     }
+
+    // MARK: Diagnose
 
     /// Liest die Go-Absturzmeldung des letzten Laufs.
     func loadDiagnostics() {
@@ -90,9 +101,6 @@ final class NetBirdManager: ObservableObject {
         goLog = NbkitLogTail(Self.directory.path, 12_000)
         if goLog.isEmpty { goLog = "(leer – der Go-Teil wurde noch nicht gestartet)" }
     }
-
-    private static let clientID = "netbird-cli"
-    private static let scopes = "openid profile email groups offline_access"
 
     // MARK: Protokoll
 
@@ -124,166 +132,103 @@ final class NetBirdManager: ObservableObject {
     /// Kurze, verständliche Fehlermeldung statt der langen NSError-Beschreibung.
     static func describe(_ error: Error) -> String {
         if let url = error as? URLError {
-            let host = url.failingURL?.path ?? ""
             switch url.code {
-            case .timedOut: return "Server antwortet nicht innerhalb von 20 s (\(host))"
-            case .networkConnectionLost: return "Server hat die Verbindung abgebrochen (\(host))"
-            case .cannotConnectToHost: return "Server nicht erreichbar (\(host))"
+            case .timedOut: return "Server antwortet nicht"
+            case .networkConnectionLost: return "Server hat die Verbindung abgebrochen"
+            case .cannotConnectToHost: return "Server nicht erreichbar"
             case .cannotFindHost: return "Hostname nicht gefunden"
             case .notConnectedToInternet: return "Keine Internetverbindung"
             case .cancelled: return "Abgebrochen"
-            default: return "Netzwerkfehler \(url.code.rawValue) (\(host))"
+            default: return "Netzwerkfehler \(url.code.rawValue)"
             }
         }
-        return TerminalSession.describe(error)
+        let text = TerminalSession.describe(error)
+        if text.localizedCaseInsensitiveContains("context canceled") { return "Abgebrochen" }
+        if text.localizedCaseInsensitiveContains("deadline exceeded") { return "Zeitlimit überschritten: \(text)" }
+        return text
     }
 
-    // MARK: OIDC (eingebauter IdP von NetBird = Dex unter <management>/oauth2)
+    // MARK: Login (originaler NetBird-Ablauf)
 
-    private struct Discovery: Decodable {
-        let issuer: String
-        let token_endpoint: String
-        let device_authorization_endpoint: String?
+    /// Zwischengespeichertes Token, solange es jung genug ist.
+    private var cachedToken: String? {
+        guard let token, let until = tokenValidUntil, until > .now else { return nil }
+        return token
     }
 
-    private var issuer: String {
-        var base = managementURL.trimmed
-        while base.hasSuffix("/") { base.removeLast() }
-        return base + "/oauth2"
+    /// Token holen: aus dem Cache oder per Browser-Login. Läuft höchstens einmal gleichzeitig.
+    func obtainToken() async throws -> String {
+        if let cachedToken { return cachedToken }
+        if let tokenTask { return try await tokenTask.value }
+        let task = Task { try await requestToken() }
+        tokenTask = task
+        defer { tokenTask = nil }
+        return try await task.value
     }
 
-    private func discover() async throws -> Discovery {
-        guard let url = URL(string: issuer + "/.well-known/openid-configuration") else { throw NetBirdError.badURL }
-        let (data, response) = try await session.data(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw NetBirdError.http("OIDC-Discovery unter \(url.absoluteString) fehlgeschlagen")
-        }
-        return try JSONDecoder().decode(Discovery.self, from: data)
-    }
-
-    private func post(_ endpoint: String, _ form: [String: String]) async throws -> (Int, [String: Any]) {
-        guard let url = URL(string: endpoint) else { throw NetBirdError.badURL }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        req.httpBody = form.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
-            .joined(separator: "&").data(using: .utf8)
-        let (data, response) = try await session.data(for: req)
-        let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-        return ((response as? HTTPURLResponse)?.statusCode ?? 0, json)
-    }
-
-    /// Device-Flow: Code anzeigen, Browser öffnen, Token abholen.
-    func startLogin() {
-        // Kein Abbrechen bei erneutem Tippen: das erzeugte nur verwaiste Anfragen am IdP.
-        guard loginTask == nil else { return }
-        loginTask = Task {
-            await login()
-            loginTask = nil
+    /// Nur für die Schaltfläche „Anmelden“.
+    func login() {
+        Task {
+            do { _ = try await obtainToken() } catch { report(error) }
         }
     }
 
-    func cancelLogin() {
-        loginTask?.cancel()
-        loginTask = nil
-        if case .loggingIn = state { state = .idle }
-    }
-
-    private func login() async {
+    private func requestToken() async throws -> String {
+        let url = managementURL.trimmed
+        guard URL(string: url) != nil, !url.isEmpty else { throw NetBirdError.badURL }
         loginBusy = true
         defer { loginBusy = false }
-        do {
-            let d = try await discover()
-            note("Issuer: \(d.issuer)")
-            guard let deviceEndpoint = d.device_authorization_endpoint else { throw NetBirdError.noDeviceFlow }
-            let (code, start) = try await post(deviceEndpoint, ["client_id": Self.clientID, "scope": Self.scopes])
-            guard code == 200, let deviceCode = start["device_code"] as? String,
-                  let userCode = start["user_code"] as? String else {
-                throw NetBirdError.http("Device-Flow abgelehnt: \(start["error_description"] ?? start["error"] ?? code)")
-            }
-            let verify = (start["verification_uri_complete"] as? String) ?? (start["verification_uri"] as? String) ?? ""
-            guard let verifyURL = URL(string: verify) else { throw NetBirdError.badURL }
-            var interval = UInt64((start["interval"] as? Int) ?? 5)
-            state = .loggingIn(userCode: userCode, url: verifyURL)
-            loginBusy = false
-            note("Login gestartet, Code \(userCode)")
+        note("Login über NetBird (\(url)) …")
 
-            while true {
-                try await Task.sleep(nanoseconds: interval * 1_000_000_000)
-                let (status, body) = try await post(d.token_endpoint, [
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "device_code": deviceCode,
-                    "client_id": Self.clientID,
-                ])
-                if status == 200 {
-                    try storeTokens(body)
-                    state = .idle
-                    note("Angemeldet. Refresh-Token: \(body["refresh_token"] != nil ? "ja" : "NEIN")")
-                    return
-                }
-                switch body["error"] as? String {
-                case "authorization_pending": continue
-                case "slow_down": interval += 5
-                default: throw NetBirdError.http("Token-Abruf: \(body["error_description"] ?? body["error"] ?? status)")
+        let opener = LoginOpener { [weak self] link, code in
+            Task { @MainActor in
+                guard let self else { return }
+                self.loginBusy = false
+                if let target = URL(string: link) {
+                    self.loginPrompt = LoginPrompt(url: target, userCode: code)
+                    self.note(code.isEmpty ? "Browser-Login geöffnet" : "Browser-Login geöffnet, Code \(code)")
+                } else {
+                    self.note("Ungültiger Login-Link: \(link)")
                 }
             }
-        } catch is CancellationError {
-            note("Login abgebrochen")
-        } catch {
-            state = .failed(Self.describe(error))
-            note("Fehler: \(Self.describe(error))")
         }
+        defer { loginPrompt = nil }
+
+        let jwt: String = try await Task.detached {
+            var err: NSError?
+            let t = NbkitRequestJWT(url, opener, 300, &err)
+            if let err { throw err }
+            return t
+        }.value
+
+        guard jwt.split(separator: ".").count == 3 else { throw NetBirdError.http("Kein JWT erhalten") }
+        token = jwt
+        let iat = (Self.claims(of: jwt)?["iat"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? .now
+        tokenValidUntil = iat.addingTimeInterval(Self.tokenCacheSeconds)
+        if let claims = Self.claims(of: jwt) {
+            note("Angemeldet: \(claims["email"] ?? claims["sub"] ?? "?"), aud=\(claims["aud"] ?? "?")")
+        }
+        return jwt
     }
 
-    private func storeTokens(_ body: [String: Any]) throws {
-        let access = body["access_token"] as? String
-        let id = body["id_token"] as? String
-        // NetBird prüft ein JWT; Dex liefert Access-Tokens als JWT, sonst ID-Token nehmen.
-        if let access, access.split(separator: ".").count == 3 {
-            accessToken = access
-        } else if let id {
-            accessToken = id
-        } else {
-            throw NetBirdError.http("Kein JWT in der Antwort")
-        }
-        if let refresh = body["refresh_token"] as? String {
-            KeychainStore.setString(refresh, service: "netbird", account: "refresh")
-        }
-        loggedIn = true
-        if let claims = Self.claims(of: accessToken ?? "") {
-            note("Token: sub=\(claims["sub"] ?? "?"), aud=\(claims["aud"] ?? "?"), email=\(claims["email"] ?? "-")")
-        }
+    /// Bricht den Browser-Login ab (gibt auch localhost:53000 wieder frei).
+    func cancelLogin() {
+        loginPrompt = nil
+        Task.detached { NbkitCancelJWTRequest() }
+        note("Login abgebrochen")
     }
 
-    /// Frisches Token (jünger als 5 Minuten, NetBird SSH akzeptiert höchstens 10).
-    func freshToken() async throws -> String {
-        if let token = accessToken, let iat = Self.claims(of: token)?["iat"] as? Double,
-           Date.now.timeIntervalSince1970 - iat < 300 {
-            return token
-        }
-        let refresh = KeychainStore.string(service: "netbird", account: "refresh")
-        guard !refresh.isEmpty else { throw NetBirdError.notLoggedIn }
-        let d = try await discover()
-        let (status, body) = try await post(d.token_endpoint, [
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-            "client_id": Self.clientID,
-        ])
-        guard status == 200 else {
-            throw NetBirdError.http("Refresh fehlgeschlagen: \(body["error_description"] ?? body["error"] ?? status)")
-        }
-        try storeTokens(body)
-        note("Token still erneuert")
-        return accessToken!
+    /// Verwirft das zwischengespeicherte Token.
+    func forgetToken() {
+        token = nil
+        tokenValidUntil = nil
+        note("Token verworfen")
     }
 
-    func logout() {
-        KeychainStore.delete(service: "netbird", account: "refresh")
-        accessToken = nil
-        loggedIn = false
-        note("Abgemeldet")
+    private func report(_ error: Error) {
+        let text = Self.describe(error)
+        if text == "Abgebrochen" { return }
+        note("Fehler: \(text)")
     }
 
     static func claims(of jwt: String) -> [String: Any]? {
@@ -304,34 +249,21 @@ final class NetBirdManager: ObservableObject {
         startingSince = .now
         defer { startingSince = nil }
         do {
-            let token = try await freshToken()
-            let dir = Self.directory
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = managementURL.trimmed
-            let name = "shellwave-" + DeviceKey.deviceSlug
-            note("Starte Peer \(name) …")
-            let pending = self.pending
-
-            let node: NbkitNode = try await Task.detached {
-                var err: NSError?
-                guard let n = NbkitNewNode(url, "", token, name, dir.path, &err) else {
-                    throw err ?? NetBirdError.http("Peer konnte nicht angelegt werden")
-                }
-                pending.set(n)
-                defer { pending.set(nil) }
-                do {
-                    try n.start(40)
-                } catch {
-                    if pending.wasCancelled { throw CancellationError() }
-                    throw error
-                }
-                if pending.wasCancelled {
-                    try? n.stop()
-                    throw CancellationError()
-                }
-                return n
-            }.value
-            self.node = node
+            // Erstes Mal: Peer per Token registrieren. Danach reicht der gespeicherte Peer-Schlüssel.
+            var jwt = cachedToken ?? ""
+            if !peerRegistered && jwt.isEmpty {
+                jwt = try await obtainToken()
+                startingSince = .now
+            }
+            do {
+                try await launch(jwt: jwt)
+            } catch let error where jwt.isEmpty && Self.needsLogin(error) {
+                note("Peer braucht eine neue Anmeldung …")
+                let fresh = try await obtainToken()
+                startingSince = .now
+                try await launch(jwt: fresh)
+            }
+            peerRegistered = true
             state = .running
             note("Overlay läuft")
             refreshPeers()
@@ -345,27 +277,47 @@ final class NetBirdManager: ObservableObject {
         }
     }
 
+    private func launch(jwt: String) async throws {
+        let dir = Self.directory
+        let url = managementURL.trimmed
+        let name = "shellwave-" + DeviceKey.deviceSlug
+        note("Starte Peer \(name)\(jwt.isEmpty ? "" : " mit Token") …")
+        let pending = self.pending
+
+        let node: NbkitNode = try await Task.detached {
+            var err: NSError?
+            guard let n = NbkitNewNode(url, "", jwt, name, dir.path, &err) else {
+                throw err ?? NetBirdError.http("Peer konnte nicht angelegt werden")
+            }
+            pending.set(n)
+            defer { pending.set(nil) }
+            do {
+                try n.start(40)
+            } catch {
+                if pending.wasCancelled { throw CancellationError() }
+                throw error
+            }
+            if pending.wasCancelled {
+                try? n.stop()
+                throw CancellationError()
+            }
+            return n
+        }.value
+        self.node = node
+    }
+
+    private static func needsLogin(_ error: Error) -> Bool {
+        let text = error.localizedDescription.lowercased()
+        return ["permission", "login", "expired", "unauthenticated", "jwt", "sso"].contains { text.contains($0) }
+    }
+
     /// Bricht einen laufenden Overlay-Start ab.
     func cancelOverlayStart() {
         guard state == .starting else { return }
         note("Breche Overlay-Start ab …")
+        if loginPrompt != nil { cancelLogin() }
         let pending = self.pending
         Task.detached { pending.cancel() }
-    }
-
-    /// Stoppt das Overlay und löscht Peer-Konfiguration, Logs und Absturzmeldungen.
-    /// Beim nächsten Start meldet sich die App als neuer Peer an.
-    func resetData() async {
-        await stopOverlay()
-        let fm = FileManager.default
-        if let items = try? fm.contentsOfDirectory(at: Self.directory, includingPropertiesForKeys: nil) {
-            for item in items { try? fm.removeItem(at: item) }
-        }
-        lastCrash = ""
-        goLog = ""
-        state = .idle
-        log = []
-        note("NetBird-Daten zurückgesetzt. Den alten Peer „shellwave-…“ bitte im Dashboard löschen.")
     }
 
     func stopOverlay() async {
@@ -377,6 +329,24 @@ final class NetBirdManager: ObservableObject {
         _ = await Task.detached { try? node.stop() }.value
         state = .idle
         note("Overlay gestoppt")
+    }
+
+    /// Stoppt das Overlay und löscht Peer-Konfiguration, Logs und Absturzmeldungen.
+    /// Beim nächsten Start meldet sich die App als neuer Peer an.
+    func resetData() async {
+        await stopOverlay()
+        let fm = FileManager.default
+        if let items = try? fm.contentsOfDirectory(at: Self.directory, includingPropertiesForKeys: nil) {
+            for item in items { try? fm.removeItem(at: item) }
+        }
+        peerRegistered = false
+        token = nil
+        tokenValidUntil = nil
+        lastCrash = ""
+        goLog = ""
+        state = .idle
+        log = []
+        note("NetBird-Daten zurückgesetzt. Den alten Peer „shellwave-…“ bitte im Dashboard löschen.")
     }
 
     func refreshPeers() {
@@ -404,7 +374,7 @@ final class NetBirdManager: ObservableObject {
     /// Verbindet per NetBird SSH und führt einen Befehl aus.
     func runTest(peer: Peer, username: String, command: String) async -> String {
         do {
-            let token = try await freshToken()
+            let token = try await obtainToken()
             let port = try proxyPort(for: peer.ip)
             note("SSH \(username)@\(peer.fqdn) über 127.0.0.1:\(port)")
             let validator = NetBirdHostKeyValidator(node: node, peerAddress: peer.ip) { [weak self] text in
@@ -425,6 +395,19 @@ final class NetBirdManager: ObservableObject {
             note("Fehler: \(Self.describe(error))")
             return "Fehler: \(Self.describe(error))"
         }
+    }
+}
+
+/// Brücke für den Go-Callback „Browser öffnen“.
+final class LoginOpener: NSObject, NbkitURLOpenerProtocol, @unchecked Sendable {
+    private let handler: @Sendable (String, String) -> Void
+
+    init(handler: @escaping @Sendable (String, String) -> Void) {
+        self.handler = handler
+    }
+
+    func open(_ url: String?, userCode: String?) {
+        handler(url ?? "", userCode ?? "")
     }
 }
 

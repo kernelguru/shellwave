@@ -12,10 +12,10 @@ struct NetBirdTestView: View {
     @State private var confirmReset = false
     @State private var showGoLog = false
 
-    private var loginURL: Binding<URL?> {
+    private var loginPrompt: Binding<NetBirdManager.LoginPrompt?> {
         Binding(
-            get: { if case .loggingIn(_, let url) = nb.state { return url } else { return nil } },
-            set: { if $0 == nil { nb.cancelLogin() } }
+            get: { nb.loginPrompt },
+            set: { if $0 == nil, nb.loginPrompt != nil { nb.cancelLogin() } }
         )
     }
 
@@ -51,23 +51,36 @@ struct NetBirdTestView: View {
                 Text("Ohne Pfad. Der eingebaute IdP wird unter /oauth2 erwartet.")
             }
 
-            Section("1. Anmelden") {
-                if nb.loggedIn {
-                    Label("Angemeldet", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
-                    Button("Abmelden", role: .destructive) { nb.logout() }
+            Section {
+                if nb.loginBusy {
+                    HStack { ProgressView(); Text("Verbinde mit NetBird …") }
+                } else if let prompt = nb.loginPrompt {
+                    if !prompt.userCode.isEmpty {
+                        LabeledContent("Code", value: prompt.userCode).font(.body.monospaced())
+                    }
+                    Button("Login abbrechen", role: .destructive) { nb.cancelLogin() }
                 } else {
-                    if nb.loginBusy {
-                        HStack { ProgressView(); Text("Verbinde mit dem IdP …") }
-                    } else if case .loggingIn = nb.state {
-                        Button("Login abbrechen", role: .destructive) { nb.cancelLogin() }
-                    } else {
-                        Button("Mit NetBird anmelden", systemImage: "person.badge.key") { nb.startLogin() }
-                            .disabled(nb.managementURL.trimmed.isEmpty)
+                    Button("Anmelden", systemImage: "person.badge.key") { nb.login() }
+                        .disabled(nb.managementURL.trimmed.isEmpty)
+                }
+                if let until = nb.tokenValidUntil, until > .now {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let rest = max(0, Int(until.timeIntervalSince(context.date)))
+                        HStack {
+                            Label(rest > 0 ? "Token gültig noch \(rest / 60):\(String(format: "%02d", rest % 60))" : "Token abgelaufen",
+                                  systemImage: "checkmark.seal.fill")
+                                .foregroundStyle(rest > 0 ? .green : .secondary)
+                                .monospacedDigit()
+                            Spacer()
+                            Button("Verwerfen") { nb.forgetToken() }.font(.footnote)
+                        }
                     }
                 }
-                if case .loggingIn(let code, _) = nb.state {
-                    LabeledContent("Code", value: code).font(.body.monospaced())
-                }
+                LabeledContent("Peer registriert", value: nb.peerRegistered ? "ja" : "nein")
+            } header: {
+                Text("1. Anmelden")
+            } footer: {
+                Text("Originaler NetBird-Login im Browser. Das Token wird 5 Minuten für Overlay-Start und NetBird SSH wiederverwendet.")
             }
 
             Section("2. Overlay") {
@@ -91,7 +104,7 @@ struct NetBirdTestView: View {
                     Button("Abbrechen", role: .destructive) { nb.cancelOverlayStart() }
                 default:
                     Button("Overlay starten", systemImage: "network") { Task { await nb.startOverlay() } }
-                        .disabled(!nb.loggedIn)
+                        .disabled(nb.managementURL.trimmed.isEmpty)
                 }
                 if case .failed(let message) = nb.state {
                     Text(message).font(.footnote).foregroundStyle(.red).textSelection(.enabled)
@@ -204,8 +217,8 @@ struct NetBirdTestView: View {
                 }
             }
         }
-        .sheet(item: loginURL) { url in
-            SafariView(url: url)
+        .sheet(item: loginPrompt) { prompt in
+            SafariView(url: prompt.url)
                 .ignoresSafeArea()
         }
     }

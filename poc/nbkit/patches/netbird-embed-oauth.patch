@@ -1,0 +1,52 @@
+diff --git a/client/embed/shellwave_oauth.go b/client/embed/shellwave_oauth.go
+new file mode 100644
+index 0000000..7f4358c
+--- /dev/null
++++ b/client/embed/shellwave_oauth.go
+@@ -0,0 +1,46 @@
++package embed
++
++// Shellwave patch: exposes NetBird's own OAuth login (PKCE with device-code
++// fallback, parameters provided by the management server) to embedding apps.
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"github.com/netbirdio/netbird/client/internal/auth"
++	"github.com/netbirdio/netbird/client/internal/profilemanager"
++)
++
++// RequestJWT runs the same interactive login the official clients use and
++// returns the token NetBird expects (for peer login or NetBird SSH).
++// open is called with the URL the user has to visit (and the device code,
++// if the device flow is used).
++func RequestJWT(ctx context.Context, managementURL, hint string, open func(verificationURL, userCode string)) (string, error) {
++	config, err := profilemanager.CreateInMemoryConfig(profilemanager.ConfigInput{ManagementURL: managementURL})
++	if err != nil {
++		return "", fmt.Errorf("create config: %w", err)
++	}
++
++	flow, err := auth.NewOAuthFlow(ctx, config, false, false, hint, false)
++	if err != nil {
++		return "", fmt.Errorf("oauth flow: %w", err)
++	}
++
++	infoCtx, cancelInfo := context.WithTimeout(ctx, 30*time.Second)
++	info, err := flow.RequestAuthInfo(infoCtx)
++	cancelInfo()
++	if err != nil {
++		return "", fmt.Errorf("request auth info: %w", err)
++	}
++
++	open(info.VerificationURIComplete, info.UserCode)
++
++	waitCtx, cancelWait := context.WithTimeout(ctx, time.Duration(info.ExpiresIn)*time.Second)
++	defer cancelWait()
++	tokenInfo, err := flow.WaitToken(waitCtx, info)
++	if err != nil {
++		return "", fmt.Errorf("wait for login: %w", err)
++	}
++	return tokenInfo.GetTokenToUse(), nil
++}

@@ -203,3 +203,52 @@ func (n *Node) StatusJSON() (string, error) {
 func (n *Node) VerifySSHHostKey(peerAddress string, key []byte) error {
 	return n.client.VerifySSHHostKey(peerAddress, key)
 }
+
+// URLOpener wird aufgerufen, wenn der Nutzer sich im Browser anmelden muss.
+type URLOpener interface {
+	Open(url string, userCode string)
+}
+
+var (
+	jwtMu     sync.Mutex
+	jwtCancel context.CancelFunc
+	jwtGen    int
+)
+
+// RequestJWT führt den originalen NetBird-Login aus (PKCE im Browser, sonst
+// Device-Code; Parameter kommen vom Management-Server) und liefert das Token.
+func RequestJWT(managementURL string, opener URLOpener, timeoutSeconds int) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+	jwtMu.Lock()
+	if jwtCancel != nil {
+		jwtCancel()
+	}
+	jwtCancel = cancel
+	jwtGen++
+	gen := jwtGen
+	jwtMu.Unlock()
+	defer func() {
+		cancel()
+		jwtMu.Lock()
+		if jwtGen == gen {
+			jwtCancel = nil
+		}
+		jwtMu.Unlock()
+	}()
+	return embed.RequestJWT(ctx, managementURL, "", func(url, code string) {
+		if opener != nil {
+			opener.Open(url, code)
+		}
+	})
+}
+
+// CancelJWTRequest bricht einen laufenden Login ab und gibt den
+// Redirect-Port (localhost:53000) wieder frei.
+func CancelJWTRequest() {
+	jwtMu.Lock()
+	defer jwtMu.Unlock()
+	if jwtCancel != nil {
+		jwtCancel()
+		jwtCancel = nil
+	}
+}
