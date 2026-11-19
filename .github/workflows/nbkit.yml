@@ -1,0 +1,50 @@
+name: NetBird PoC (NBKit.xcframework)
+
+on:
+  push:
+    branches: [netbird-poc]
+    paths: ["poc/**", ".github/workflows/nbkit.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: gomobile installieren
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+      - name: Abhängigkeiten auflösen
+        working-directory: poc/nbkit
+        run: |
+          go get golang.org/x/mobile/bind
+          go mod tidy
+          go list -m github.com/netbirdio/netbird
+      - name: Für iOS prüfen (go vet)
+        working-directory: poc/nbkit
+        run: GOOS=ios GOARCH=arm64 CGO_ENABLED=1 go vet ./... || true
+      - name: xcframework bauen
+        working-directory: poc/nbkit
+        run: |
+          gomobile bind -target ios,iossimulator -iosversion 17.0 -o NBKit.xcframework -v .
+      - name: Größe
+        working-directory: poc/nbkit
+        run: |
+          du -sh NBKit.xcframework
+          find NBKit.xcframework -name "Nbkit" -o -name "NBKit" | xargs ls -la || true
+          ls -R NBKit.xcframework | head -40
+          cat NBKit.xcframework/ios-arm64/*.framework/Headers/*.h | head -80
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NBKit-xcframework
+          path: poc/nbkit/NBKit.xcframework
+          retention-days: 7
