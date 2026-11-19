@@ -23,6 +23,7 @@ jobs:
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           gomobile init
+          poc/nbkit/prepare-netbird.sh
       - name: Abhängigkeiten auflösen
         working-directory: poc/nbkit
         run: |

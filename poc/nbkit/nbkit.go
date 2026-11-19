@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -23,17 +26,94 @@ type Node struct {
 	listeners []net.Listener
 }
 
+var (
+	logMu   sync.Mutex
+	logFile *os.File
+)
+
+// SetupLogging leitet Go-Panics und das NetBird-Log in Dateien unter dir um.
+// Eine Absturzmeldung aus dem letzten Lauf wird nach go-crash-last.log verschoben.
+func SetupLogging(dir string) error {
+	logMu.Lock()
+	defer logMu.Unlock()
+	if logFile != nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	crash := filepath.Join(dir, "go-crash.log")
+	if st, err := os.Stat(crash); err == nil && st.Size() > 0 {
+		_ = os.Rename(crash, filepath.Join(dir, "go-crash-last.log"))
+	}
+	cf, err := os.Create(crash)
+	if err != nil {
+		return err
+	}
+	if err := debug.SetCrashOutput(cf, debug.CrashOptions{}); err != nil {
+		return err
+	}
+	_ = cf.Close()
+
+	logPath := filepath.Join(dir, "go.log")
+	if st, err := os.Stat(logPath); err == nil && st.Size() > 2<<20 {
+		_ = os.Rename(logPath, filepath.Join(dir, "go.prev.log"))
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	logFile = f
+	return nil
+}
+
+// LastCrash liefert die Absturzmeldung des letzten Laufs (leer, wenn keine).
+func LastCrash(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, "go-crash-last.log"))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// ClearCrash löscht die gespeicherte Absturzmeldung.
+func ClearCrash(dir string) {
+	_ = os.Remove(filepath.Join(dir, "go-crash-last.log"))
+}
+
+// LogTail liefert die letzten maxBytes des NetBird-Logs.
+func LogTail(dir string, maxBytes int) string {
+	b, err := os.ReadFile(filepath.Join(dir, "go.log"))
+	if err != nil {
+		return ""
+	}
+	if maxBytes > 0 && len(b) > maxBytes {
+		b = b[len(b)-maxBytes:]
+	}
+	return string(b)
+}
+
 // NewNode legt einen Peer an. Entweder setupKey oder jwt angeben.
-func NewNode(managementURL, setupKey, jwt, deviceName, statePath string) (*Node, error) {
-	c, err := embed.New(embed.Options{
+// In dir liegt die Peer-Konfiguration (WireGuard-Schlüssel), damit jeder Start
+// derselbe Peer bleibt. Der Laufzeit-Zustand wird nur im Speicher gehalten.
+func NewNode(managementURL, setupKey, jwt, deviceName, dir string) (*Node, error) {
+	if err := SetupLogging(dir); err != nil {
+		return nil, fmt.Errorf("log: %w", err)
+	}
+	opts := embed.Options{
 		DeviceName:    deviceName,
 		SetupKey:      setupKey,
 		JWTToken:      jwt,
 		ManagementURL: managementURL,
-		ConfigPath:    statePath + "/netbird.json",
-		StatePath:     statePath + "/state.json",
+		ConfigPath:    filepath.Join(dir, "netbird.json"),
 		LogLevel:      "info",
-	})
+	}
+	logMu.Lock()
+	if logFile != nil {
+		opts.LogOutput = logFile
+	}
+	logMu.Unlock()
+	c, err := embed.New(opts)
 	if err != nil {
 		return nil, fmt.Errorf("netbird: %w", err)
 	}

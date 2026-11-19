@@ -1,0 +1,64 @@
+diff --git a/client/iface/iface_new_ios.go b/client/iface/iface_new_ios.go
+index ca4dd42..744ccb5 100644
+--- a/client/iface/iface_new_ios.go
++++ b/client/iface/iface_new_ios.go
+@@ -5,6 +5,7 @@ package iface
+ import (
+ 	"github.com/netbirdio/netbird/client/iface/bind"
+ 	"github.com/netbirdio/netbird/client/iface/device"
++	"github.com/netbirdio/netbird/client/iface/netstack"
+ 	"github.com/netbirdio/netbird/client/iface/wgproxy"
+ )
+ 
+@@ -12,6 +13,16 @@ import (
+ func NewWGIFace(opts WGIFaceOpts) (*WGIface, error) {
+ 	iceBind := bind.NewICEBind(opts.TransportNet, opts.Address, opts.MTU)
+ 
++	// Shellwave patch: embedded clients (client/embed) run in userspace
++	// netstack mode and have no NEPacketTunnelProvider file descriptor.
++	if netstack.IsEnabled() || opts.MobileArgs == nil || opts.MobileArgs.TunFd == 0 {
++		return &WGIface{
++			userspaceBind:  true,
++			tun:            device.NewNetstackDevice(opts.IFaceName, opts.Address, opts.WGPort, opts.WGPrivKey, opts.MTU, iceBind, netstack.ListenAddr()),
++			wgProxyFactory: wgproxy.NewUSPFactory(iceBind, opts.MTU),
++		}, nil
++	}
++
+ 	wgIFace := &WGIface{
+ 		tun:            device.NewTunDevice(opts.IFaceName, opts.Address, opts.WGPort, opts.WGPrivKey, opts.MTU, iceBind, opts.MobileArgs.TunFd),
+ 		userspaceBind:  true,
+diff --git a/client/internal/dns/host_ios.go b/client/internal/dns/host_ios.go
+index 860bb8b..d9539de 100644
+--- a/client/internal/dns/host_ios.go
++++ b/client/internal/dns/host_ios.go
+@@ -36,6 +36,10 @@ func (a iosHostManager) applyDNSConfig(config HostDNSConfig, _ *statemanager.Man
+ 	}
+ 	jsonString := string(jsonData)
+ 	log.Debugf("Applying DNS settings: %s", jsonString)
++	// Shellwave patch: the embedded client has no iOS DNS manager.
++	if a.dnsManager == nil {
++		return nil
++	}
+ 	a.dnsManager.ApplyDns(jsonString)
+ 	return nil
+ }
+diff --git a/client/internal/engine.go b/client/internal/engine.go
+index 4de0209..fb89228 100644
+--- a/client/internal/engine.go
++++ b/client/internal/engine.go
+@@ -2261,9 +2261,12 @@ func (e *Engine) wgInterfaceCreate() (err error) {
+ 	case "android":
+ 		err = e.wgInterface.CreateOnAndroid(e.routeManager.CurrentRouteRange(), e.dnsServer.DnsIP().String(), e.dnsServer.SearchDomains())
+ 	case "ios":
+-		e.mobileDep.NetworkChangeListener.SetInterfaceIP(e.config.WgAddr.String())
+-		if e.config.WgAddr.HasIPv6() {
+-			e.mobileDep.NetworkChangeListener.SetInterfaceIPv6(e.config.WgAddr.IPv6String())
++		// Shellwave patch: the embedded client has no NetworkChangeListener.
++		if e.mobileDep.NetworkChangeListener != nil {
++			e.mobileDep.NetworkChangeListener.SetInterfaceIP(e.config.WgAddr.String())
++			if e.config.WgAddr.HasIPv6() {
++				e.mobileDep.NetworkChangeListener.SetInterfaceIPv6(e.config.WgAddr.IPv6String())
++			}
+ 		}
+ 		err = e.wgInterface.Create()
+ 	default:

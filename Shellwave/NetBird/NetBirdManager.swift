@@ -33,11 +33,63 @@ final class NetBirdManager: ObservableObject {
     @Published private(set) var peers: [Peer] = []
     @Published private(set) var ownIP = ""
     @Published private(set) var loggedIn = KeychainStore.get(service: "netbird", account: "refresh") != nil
+    /// Läuft gerade eine Anfrage an den IdP (Discovery, Device-Code, Token)?
+    @Published private(set) var loginBusy = false
+    /// Startzeitpunkt des Overlay-Starts, für den Zähler in der Ansicht.
+    @Published private(set) var startingSince: Date?
+    /// Absturzmeldung des Go-Teils aus dem letzten Lauf.
+    @Published private(set) var lastCrash = ""
+    /// Ende des NetBird-Logs (go.log), auf Anfrage geladen.
+    @Published private(set) var goLog = ""
 
     private var node: NbkitNode?
     private var accessToken: String?
     private var proxies: [String: Int] = [:]
     private var loginTask: Task<Void, Never>?
+    private let pending = PendingNode()
+
+    /// Kurze Zeitlimits, damit ein hängender IdP sofort auffällt.
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 30
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
+
+    static var directory: URL {
+        JSONFile.directory.appendingPathComponent("netbird", isDirectory: true)
+    }
+
+    private static var appLogURL: URL { directory.appendingPathComponent("app.log") }
+
+    private init() {
+        try? FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true)
+        // Protokoll des letzten Laufs übernehmen, damit es einen Absturz überlebt.
+        if let text = try? String(contentsOf: Self.appLogURL, encoding: .utf8) {
+            log = text.split(separator: "\n").suffix(150).map(String.init)
+        }
+        loadDiagnostics()
+    }
+
+    /// Liest die Go-Absturzmeldung des letzten Laufs.
+    func loadDiagnostics() {
+        let crash = NbkitLastCrash(Self.directory.path)
+        if !crash.isEmpty, crash != lastCrash {
+            lastCrash = crash
+            note("Go-Absturz im letzten Lauf gefunden (siehe oben)")
+        }
+    }
+
+    func clearCrash() {
+        NbkitClearCrash(Self.directory.path)
+        lastCrash = ""
+    }
+
+    func loadGoLog() {
+        goLog = NbkitLogTail(Self.directory.path, 12_000)
+        if goLog.isEmpty { goLog = "(leer – der Go-Teil wurde noch nicht gestartet)" }
+    }
 
     private static let clientID = "netbird-cli"
     private static let scopes = "openid profile email groups offline_access"
@@ -46,8 +98,44 @@ final class NetBirdManager: ObservableObject {
 
     func note(_ text: String) {
         let stamp = Date.now.formatted(date: .omitted, time: .standard)
-        log.append("\(stamp)  \(text)")
+        let line = "\(stamp)  \(text)"
+        log.append(line)
         if log.count > 200 { log.removeFirst(log.count - 200) }
+        appendToFile(line)
+    }
+
+    private func appendToFile(_ line: String) {
+        let data = Data((line.replacingOccurrences(of: "\n", with: " ") + "\n").utf8)
+        let url = Self.appLogURL
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    func clearLog() {
+        log = []
+        try? FileManager.default.removeItem(at: Self.appLogURL)
+    }
+
+    /// Kurze, verständliche Fehlermeldung statt der langen NSError-Beschreibung.
+    static func describe(_ error: Error) -> String {
+        if let url = error as? URLError {
+            let host = url.failingURL?.path ?? ""
+            switch url.code {
+            case .timedOut: return "Server antwortet nicht innerhalb von 20 s (\(host))"
+            case .networkConnectionLost: return "Server hat die Verbindung abgebrochen (\(host))"
+            case .cannotConnectToHost: return "Server nicht erreichbar (\(host))"
+            case .cannotFindHost: return "Hostname nicht gefunden"
+            case .notConnectedToInternet: return "Keine Internetverbindung"
+            case .cancelled: return "Abgebrochen"
+            default: return "Netzwerkfehler \(url.code.rawValue) (\(host))"
+            }
+        }
+        return TerminalSession.describe(error)
     }
 
     // MARK: OIDC (eingebauter IdP von NetBird = Dex unter <management>/oauth2)
@@ -66,7 +154,7 @@ final class NetBirdManager: ObservableObject {
 
     private func discover() async throws -> Discovery {
         guard let url = URL(string: issuer + "/.well-known/openid-configuration") else { throw NetBirdError.badURL }
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw NetBirdError.http("OIDC-Discovery unter \(url.absoluteString) fehlgeschlagen")
         }
@@ -82,15 +170,19 @@ final class NetBirdManager: ObservableObject {
         allowed.insert(charactersIn: "-._~")
         req.httpBody = form.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
             .joined(separator: "&").data(using: .utf8)
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         return ((response as? HTTPURLResponse)?.statusCode ?? 0, json)
     }
 
     /// Device-Flow: Code anzeigen, Browser öffnen, Token abholen.
     func startLogin() {
-        loginTask?.cancel()
-        loginTask = Task { await login() }
+        // Kein Abbrechen bei erneutem Tippen: das erzeugte nur verwaiste Anfragen am IdP.
+        guard loginTask == nil else { return }
+        loginTask = Task {
+            await login()
+            loginTask = nil
+        }
     }
 
     func cancelLogin() {
@@ -100,6 +192,8 @@ final class NetBirdManager: ObservableObject {
     }
 
     private func login() async {
+        loginBusy = true
+        defer { loginBusy = false }
         do {
             let d = try await discover()
             note("Issuer: \(d.issuer)")
@@ -113,6 +207,7 @@ final class NetBirdManager: ObservableObject {
             guard let verifyURL = URL(string: verify) else { throw NetBirdError.badURL }
             var interval = UInt64((start["interval"] as? Int) ?? 5)
             state = .loggingIn(userCode: userCode, url: verifyURL)
+            loginBusy = false
             note("Login gestartet, Code \(userCode)")
 
             while true {
@@ -137,8 +232,8 @@ final class NetBirdManager: ObservableObject {
         } catch is CancellationError {
             note("Login abgebrochen")
         } catch {
-            state = .failed(TerminalSession.describe(error))
-            note("Fehler: \(TerminalSession.describe(error))")
+            state = .failed(Self.describe(error))
+            note("Fehler: \(Self.describe(error))")
         }
     }
 
@@ -204,31 +299,73 @@ final class NetBirdManager: ObservableObject {
 
     func startOverlay() async {
         guard node == nil else { refreshPeers(); return }
+        guard state != .starting else { return }
         state = .starting
+        startingSince = .now
+        defer { startingSince = nil }
         do {
             let token = try await freshToken()
-            let dir = JSONFile.directory.appendingPathComponent("netbird", isDirectory: true)
+            let dir = Self.directory
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let url = managementURL.trimmed
             let name = "shellwave-" + DeviceKey.deviceSlug
             note("Starte Peer \(name) …")
+            let pending = self.pending
 
             let node: NbkitNode = try await Task.detached {
                 var err: NSError?
                 guard let n = NbkitNewNode(url, "", token, name, dir.path, &err) else {
                     throw err ?? NetBirdError.http("Peer konnte nicht angelegt werden")
                 }
-                try n.start(45)
+                pending.set(n)
+                defer { pending.set(nil) }
+                do {
+                    try n.start(40)
+                } catch {
+                    if pending.wasCancelled { throw CancellationError() }
+                    throw error
+                }
+                if pending.wasCancelled {
+                    try? n.stop()
+                    throw CancellationError()
+                }
                 return n
             }.value
             self.node = node
             state = .running
             note("Overlay läuft")
             refreshPeers()
+        } catch is CancellationError {
+            state = .idle
+            note("Overlay-Start abgebrochen")
         } catch {
-            state = .failed(TerminalSession.describe(error))
-            note("Fehler: \(TerminalSession.describe(error))")
+            state = .failed(Self.describe(error))
+            note("Fehler: \(Self.describe(error))")
+            loadDiagnostics()
         }
+    }
+
+    /// Bricht einen laufenden Overlay-Start ab.
+    func cancelOverlayStart() {
+        guard state == .starting else { return }
+        note("Breche Overlay-Start ab …")
+        let pending = self.pending
+        Task.detached { pending.cancel() }
+    }
+
+    /// Stoppt das Overlay und löscht Peer-Konfiguration, Logs und Absturzmeldungen.
+    /// Beim nächsten Start meldet sich die App als neuer Peer an.
+    func resetData() async {
+        await stopOverlay()
+        let fm = FileManager.default
+        if let items = try? fm.contentsOfDirectory(at: Self.directory, includingPropertiesForKeys: nil) {
+            for item in items { try? fm.removeItem(at: item) }
+        }
+        lastCrash = ""
+        goLog = ""
+        state = .idle
+        log = []
+        note("NetBird-Daten zurückgesetzt. Den alten Peer „shellwave-…“ bitte im Dashboard löschen.")
     }
 
     func stopOverlay() async {
@@ -285,9 +422,36 @@ final class NetBirdManager: ObservableObject {
             note("Exit \(result.exitCode)")
             return result.output
         } catch {
-            note("Fehler: \(TerminalSession.describe(error))")
-            return "Fehler: \(TerminalSession.describe(error))"
+            note("Fehler: \(Self.describe(error))")
+            return "Fehler: \(Self.describe(error))"
         }
+    }
+}
+
+/// Hält den Peer, solange er startet, damit ein Abbrechen ihn stoppen kann.
+final class PendingNode: @unchecked Sendable {
+    private let lock = NSLock()
+    private var node: NbkitNode?
+    private var cancelled = false
+
+    func set(_ node: NbkitNode?) {
+        lock.lock()
+        self.node = node
+        if node != nil { cancelled = false }
+        lock.unlock()
+    }
+
+    var wasCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let node = self.node
+        lock.unlock()
+        try? node?.stop()
     }
 }
 

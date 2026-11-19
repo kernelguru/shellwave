@@ -9,6 +9,8 @@ struct NetBirdTestView: View {
     @State private var command = "whoami; hostname; uptime"
     @State private var output = ""
     @State private var running = false
+    @State private var confirmReset = false
+    @State private var showGoLog = false
 
     private var loginURL: Binding<URL?> {
         Binding(
@@ -19,6 +21,24 @@ struct NetBirdTestView: View {
 
     var body: some View {
         Form {
+            if !nb.lastCrash.isEmpty {
+                Section {
+                    ScrollView(.horizontal) {
+                        Text(nb.lastCrash.prefix(6000))
+                            .font(.caption2.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 260)
+                    Button("Absturzmeldung kopieren", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = nb.lastCrash
+                    }
+                    Button("Verwerfen", role: .destructive) { nb.clearCrash() }
+                } header: {
+                    Label("Go-Absturz im letzten Lauf", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+
             Section {
                 TextField("https://netbird.example.com", text: $nb.managementURL)
                     .textInputAutocapitalization(.never)
@@ -36,8 +56,14 @@ struct NetBirdTestView: View {
                     Label("Angemeldet", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
                     Button("Abmelden", role: .destructive) { nb.logout() }
                 } else {
-                    Button("Mit NetBird anmelden", systemImage: "person.badge.key") { nb.startLogin() }
-                        .disabled(nb.managementURL.trimmed.isEmpty)
+                    if nb.loginBusy {
+                        HStack { ProgressView(); Text("Verbinde mit dem IdP …") }
+                    } else if case .loggingIn = nb.state {
+                        Button("Login abbrechen", role: .destructive) { nb.cancelLogin() }
+                    } else {
+                        Button("Mit NetBird anmelden", systemImage: "person.badge.key") { nb.startLogin() }
+                            .disabled(nb.managementURL.trimmed.isEmpty)
+                    }
                 }
                 if case .loggingIn(let code, _) = nb.state {
                     LabeledContent("Code", value: code).font(.body.monospaced())
@@ -51,7 +77,18 @@ struct NetBirdTestView: View {
                     Button("Peers aktualisieren", systemImage: "arrow.clockwise") { nb.refreshPeers() }
                     Button("Overlay stoppen", role: .destructive) { Task { await nb.stopOverlay() } }
                 case .starting:
-                    HStack { ProgressView(); Text("Starte …") }
+                    HStack {
+                        ProgressView()
+                        if let since = nb.startingSince {
+                            TimelineView(.periodic(from: since, by: 1)) { context in
+                                Text("Starte … \(Int(context.date.timeIntervalSince(since))) s")
+                                    .monospacedDigit()
+                            }
+                        } else {
+                            Text("Starte …")
+                        }
+                    }
+                    Button("Abbrechen", role: .destructive) { nb.cancelOverlayStart() }
                 default:
                     Button("Overlay starten", systemImage: "network") { Task { await nb.startOverlay() } }
                         .disabled(!nb.loggedIn)
@@ -109,6 +146,21 @@ struct NetBirdTestView: View {
                 }
             }
 
+            Section {
+                Button("NetBird-Log anzeigen", systemImage: "doc.text.magnifyingglass") {
+                    nb.loadGoLog()
+                    showGoLog = true
+                }
+                Button("NetBird-Daten zurücksetzen", systemImage: "trash", role: .destructive) {
+                    confirmReset = true
+                }
+                .disabled(nb.state == .starting)
+            } header: {
+                Text("Diagnose")
+            } footer: {
+                Text("Zurücksetzen löscht Peer-Schlüssel, Logs und Absturzmeldungen. Danach meldet sich die App als neuer Peer an.")
+            }
+
             Section("Protokoll") {
                 if nb.log.isEmpty {
                     Text("Noch nichts passiert.").foregroundStyle(.secondary)
@@ -120,11 +172,38 @@ struct NetBirdTestView: View {
                     Button("Protokoll kopieren", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = nb.log.joined(separator: "\n")
                     }
+                    Button("Protokoll leeren", role: .destructive) { nb.clearLog() }
                 }
             }
         }
         .navigationTitle("NetBird (Test)")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { nb.loadDiagnostics() }
+        .confirmationDialog("NetBird-Daten zurücksetzen?", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("Zurücksetzen", role: .destructive) { Task { await nb.resetData() } }
+        } message: {
+            Text("Der Peer-Schlüssel wird gelöscht. Den alten Peer im Dashboard bitte manuell entfernen.")
+        }
+        .sheet(isPresented: $showGoLog) {
+            NavigationStack {
+                ScrollView([.vertical, .horizontal]) {
+                    Text(nb.goLog)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                        .padding()
+                }
+                .navigationTitle("NetBird-Log")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Kopieren", systemImage: "doc.on.doc") { UIPasteboard.general.string = nb.goLog }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Fertig") { showGoLog = false }
+                    }
+                }
+            }
+        }
         .sheet(item: loginURL) { url in
             SafariView(url: url)
                 .ignoresSafeArea()
