@@ -137,7 +137,8 @@ enum OSDetector {
     """
 
     static func detect(on client: SSHClient) async -> HostOS? {
-        let wrapped = "sh -c \(SSHConnector.quote(command)) 2>/dev/null"
+        let quoted = "'" + command.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let wrapped = "sh -c \(quoted) 2>/dev/null"
         guard let output = try? await withTimeout(seconds: 8, operation: {
             try await client.executeCommand(wrapped, mergeStreams: true)
         }) else { return nil }
