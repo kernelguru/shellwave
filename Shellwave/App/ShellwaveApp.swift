@@ -35,7 +35,7 @@ struct ShellwaveApp: App {
                 .environmentObject(setup)
                 .environmentObject(claudeSettings)
                 .preferredColorScheme(.dark)
-                .tint(Theme.mint)
+                .tint(Theme.accent)
                 .onOpenURL { sessions.handle(url: $0) }
         }
     }

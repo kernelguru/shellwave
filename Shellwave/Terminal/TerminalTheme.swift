@@ -15,9 +15,9 @@ struct TerminalTheme: Identifiable, Hashable {
 
     static let shellwave = TerminalTheme(
         id: "shellwave", name: "Shellwave",
-        background: "05100F", foreground: "E8EEEC", cursor: "73F2CC",
-        ansi: ["0B1A1C", "F2777A", "73F2CC", "F7D774", "6CB6FF", "C397F2", "5FD7D7", "D0D8D6",
-               "4A5C5E", "FF9A9C", "9AF7DB", "FFE59A", "99CCFF", "DDB8FF", "8CEDED", "FFFFFF"]
+        background: "050B16", foreground: "E6ECF5", cursor: "6CC4FF",
+        ansi: ["0B1426", "F2777A", "73F2CC", "F7D774", "6CB6FF", "C397F2", "5FD7D7", "D0D8D6",
+               "4A5670", "FF9A9C", "9AF7DB", "FFE59A", "99CCFF", "DDB8FF", "8CEDED", "FFFFFF"]
     )
 
     static let solarizedDark = TerminalTheme(

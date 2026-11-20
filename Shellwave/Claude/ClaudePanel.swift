@@ -158,7 +158,7 @@ struct ChatRow: View {
                 Spacer(minLength: 40)
                 Text(text)
                     .padding(12)
-                    .background(Theme.teal.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
+                    .background(Theme.ocean.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
                     .textSelection(.enabled)
             }
         case .assistant(let text):

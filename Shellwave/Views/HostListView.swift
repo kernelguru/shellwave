@@ -18,7 +18,7 @@ struct HostListView: View {
         }
     }
 
-    private let columns = [GridItem(.adaptive(minimum: 300), spacing: 14)]
+    private let columns = [GridItem(.adaptive(minimum: 300), spacing: 10)]
 
     var body: some View {
         ScrollView {
@@ -26,7 +26,7 @@ struct HostListView: View {
                 emptyState
             } else {
                 // Bewusst ohne GlassEffectContainer: darin erscheinen Kontextmenüs der Karten nicht.
-                LazyVGrid(columns: columns, spacing: 14) {
+                LazyVGrid(columns: columns, spacing: 10) {
                         ForEach(filtered) { host in
                             Button {
                                 sessions.open(host)
@@ -34,9 +34,9 @@ struct HostListView: View {
                                 HostCard(host: host, session: sessions.session(for: host))
                             }
                             .buttonStyle(.plain)
-                            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 22, style: .continuous))
+                            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 18, style: .continuous))
                             .contextMenu { actions(for: host) }
-                                .overlay(alignment: .topTrailing) {
+                                .overlay(alignment: .trailing) {
                                     Menu {
                                         actions(for: host)
                                     } label: {
@@ -46,7 +46,7 @@ struct HostListView: View {
                                             .contentShape(.rect)
                                     }
                                     .tint(.secondary)
-                                    .padding(6)
+                                    .padding(.trailing, 4)
                                 }
                         }
                 }
@@ -94,7 +94,7 @@ struct HostListView: View {
         VStack(spacing: 16) {
             Image(systemName: "server.rack")
                 .font(.system(size: 44, weight: .light))
-                .foregroundStyle(Theme.mint)
+                .foregroundStyle(Theme.accent)
                 .padding(24)
                 .glassCircle()
             Text("Noch keine Hosts").font(.title3.weight(.semibold))
@@ -114,43 +114,65 @@ struct HostCard: View {
     let host: Host
     let session: TerminalSession?
 
-    var body: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                Circle().fill(host.color.color.opacity(0.25))
-                Image(systemName: "terminal")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(host.color.color)
-            }
-            .frame(width: 44, height: 44)
+    /// Ziel ohne Zusatz (die Verbindungsart steht als Symbol daneben).
+    private var target: String {
+        if host.isNetBird || host.port == 22 { return "\(host.username)@\(host.hostname)" }
+        return "\(host.username)@\(host.hostname):\(host.port)"
+    }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(host.displayName)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(host.address)
-                    .font(.footnote.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+    private var iconColor: Color { host.os.map { $0.kind.color } ?? host.color.color }
+    private var iconSymbol: String { host.os.map { $0.kind.symbol } ?? "terminal" }
+    private var authSymbol: String { host.isNetBird ? "person.badge.key" : host.auth.symbol }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(iconColor.opacity(0.22))
+                Circle().strokeBorder(host.color.color.opacity(0.55), lineWidth: 1.5)
+                Image(systemName: iconSymbol)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(iconColor)
+            }
+            .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Badge(text: host.transport.label, symbol: host.transport.symbol)
-                    if host.isNetBird {
-                        Badge(text: "NetBird-Login", symbol: "person.badge.key")
-                    } else {
-                        Badge(text: host.auth.label, symbol: host.auth.symbol)
+                    Text(host.displayName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    if let os = host.os {
+                        Text(os.label)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(os.kind.color)
+                            .lineLimit(1)
                     }
-                    ForEach(host.tags.prefix(1), id: \.self) { Badge(text: $0, symbol: "tag") }
                 }
+                HStack(spacing: 5) {
+                    Image(systemName: host.transport.symbol)
+                        .accessibilityLabel(host.transport.label)
+                    Image(systemName: authSymbol)
+                        .accessibilityLabel(host.isNetBird ? "NetBird-Login" : host.auth.label)
+                    Text(target)
+                        .font(.caption.monospaced())
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let tag = host.tags.first {
+                        Badge(text: tag, symbol: "tag")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
             if let session {
                 SessionDot(session: session)
             }
-            Color.clear.frame(width: 28)
+            Color.clear.frame(width: 24)
         }
-        .padding(16)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .contentShape(.rect)
-        .glassCard(cornerRadius: 22)
+        .glassCard(cornerRadius: 18)
     }
 }
 
@@ -161,8 +183,9 @@ struct Badge: View {
     var body: some View {
         Label(text, systemImage: symbol)
             .font(.caption2.weight(.medium))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
             .background(.white.opacity(0.08), in: Capsule())
     }
 }

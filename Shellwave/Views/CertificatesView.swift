@@ -159,7 +159,7 @@ struct CertificateCard: View {
                 .font(.footnote.monospaced())
                 .foregroundStyle(.secondary)
             ProgressView(value: progress)
-                .tint(progress > 0.2 ? Theme.mint : .orange)
+                .tint(progress > 0.2 ? Theme.accent : .orange)
             Text(remaining)
                 .font(.caption)
                 .foregroundStyle(.secondary)

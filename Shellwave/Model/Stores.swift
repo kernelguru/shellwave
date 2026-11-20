@@ -57,6 +57,13 @@ final class HostStore: ObservableObject {
         persist()
     }
 
+    /// Merkt sich das erkannte Betriebssystem (nur speichern, wenn es sich geändert hat).
+    func learnOS(_ os: HostOS, for id: UUID) {
+        guard let idx = hosts.firstIndex(where: { $0.id == id }), hosts[idx].os != os else { return }
+        hosts[idx].os = os
+        persist()
+    }
+
     func forgetHostKey(for id: UUID) {
         guard let idx = hosts.firstIndex(where: { $0.id == id }) else { return }
         hosts[idx].knownHostKey = nil

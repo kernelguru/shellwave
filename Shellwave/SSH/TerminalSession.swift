@@ -100,6 +100,16 @@ final class TerminalSession: ObservableObject, Identifiable {
         start()
     }
 
+    /// Erkennt das Betriebssystem im Hintergrund und merkt es sich beim Host.
+    private func detectOS(on client: SSHClient) {
+        let hosts = self.hosts, id = initialHost.id
+        Task {
+            if let os = await OSDetector.detect(on: client) {
+                hosts.learnOS(os, for: id)
+            }
+        }
+    }
+
     func disconnect() {
         teardown()
         if state.isActive { state = .closed }
@@ -204,6 +214,7 @@ final class TerminalSession: ObservableObject, Identifiable {
             state = .connecting
             self.client = client
             SharedConnections.shared.register(client, for: initialHost.id)
+            detectOS(on: client)
 
             let (stream, continuation) = AsyncStream<[UInt8]>.makeStream()
             inputContinuation = continuation
@@ -282,6 +293,9 @@ final class TerminalSession: ObservableObject, Identifiable {
             command += " -- sh -c \(SSHConnector.quote(inner))"
         }
         let result = try await SSHConnector.runCapturing(command, on: bootstrapClient)
+        if let os = await OSDetector.detect(on: bootstrapClient) {
+            hosts.learnOS(os, for: initialHost.id)
+        }
         try? await bootstrapClient.close()
 
         guard let (port, key) = Self.parseMoshConnect(result.output) else {

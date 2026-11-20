@@ -13,7 +13,7 @@ struct SessionLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: SessionActivityAttributes.self) { context in
             LockScreenView(context: context)
-                .activityBackgroundTint(Color(red: 0.03, green: 0.12, blue: 0.14).opacity(0.85))
+                .activityBackgroundTint(Color(red: 0.02, green: 0.06, blue: 0.15).opacity(0.85))
                 .activitySystemActionForegroundColor(.white)
                 .widgetURL(url(for: context))
         } dynamicIsland: { context in
@@ -154,7 +154,7 @@ struct StatusBadge: View {
 
 extension Color {
     init(hex: String) {
-        let v = UInt32(hex, radix: 16) ?? 0x73F2CC
+        let v = UInt32(hex, radix: 16) ?? 0x6CC7FF
         self.init(
             red: Double((v >> 16) & 0xFF) / 255,
             green: Double((v >> 8) & 0xFF) / 255,

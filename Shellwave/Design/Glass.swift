@@ -4,9 +4,12 @@ import SwiftUI
 /// Ab iOS 26 echtes Liquid Glass, davor Milchglas (Material) als Rückfall.
 
 enum Theme {
-    static let deep = Color(red: 0.03, green: 0.12, blue: 0.14)
-    static let teal = Color(red: 0.05, green: 0.45, blue: 0.42)
-    static let mint = Color(red: 0.45, green: 0.95, blue: 0.80)
+    /// Tiefes Navy (oben links im Verlauf)
+    static let deep = Color(red: 0.02, green: 0.06, blue: 0.15)
+    /// Ozeanblau (unten rechts im Verlauf, Flächen)
+    static let ocean = Color(red: 0.05, green: 0.26, blue: 0.55)
+    /// Akzent: helles Cyan-Blau („Wave“)
+    static let accent = Color(red: 0.42, green: 0.78, blue: 1.0)
 }
 
 /// Hintergrund im Stil des App-Icons, mit weichen Lichtflecken,
@@ -14,9 +17,9 @@ enum Theme {
 struct AppBackground: View {
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Theme.deep, Theme.teal], startPoint: .topLeading, endPoint: .bottomTrailing)
+            LinearGradient(colors: [Theme.deep, Theme.ocean], startPoint: .topLeading, endPoint: .bottomTrailing)
             Circle()
-                .fill(Theme.mint.opacity(0.35))
+                .fill(Theme.accent.opacity(0.35))
                 .frame(width: 360, height: 360)
                 .blur(radius: 90)
                 .offset(x: -120, y: -260)
@@ -45,7 +48,7 @@ extension View {
     @ViewBuilder
     func glassCircle() -> some View {
         if #available(iOS 26.0, *) {
-            self.glassEffect(.regular.tint(Theme.mint.opacity(0.25)), in: .circle)
+            self.glassEffect(.regular.tint(Theme.accent.opacity(0.25)), in: .circle)
         } else {
             self.background(.ultraThinMaterial, in: Circle())
         }

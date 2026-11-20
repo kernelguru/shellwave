@@ -115,7 +115,7 @@ struct SessionView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .frame(width: 40, height: 40)
                 }
-                .glassEffect(.regular.tint(Theme.mint.opacity(0.25)).interactive(), in: .circle)
+                .glassEffect(.regular.tint(Theme.accent.opacity(0.25)).interactive(), in: .circle)
 
                 Menu {
                     Button("Snippets", systemImage: "text.badge.plus") { showSnippets = true }

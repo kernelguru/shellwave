@@ -331,7 +331,7 @@ struct SFTPBrowserView: View {
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: file.symbol)
-                            .foregroundStyle(file.isDirectory ? Theme.mint : .secondary)
+                            .foregroundStyle(file.isDirectory ? Theme.accent : .secondary)
                             .frame(width: 24)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(file.name).lineLimit(1)
@@ -357,7 +357,7 @@ struct SFTPBrowserView: View {
                         }
                         .tint(.blue)
                         Button("Bearbeiten", systemImage: "pencil.line") { editing = file }
-                            .tint(Theme.teal)
+                            .tint(Theme.ocean)
                     }
                 }
                 .swipeActions {

@@ -50,7 +50,7 @@ enum HostColor: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
     var color: Color {
         switch self {
-        case .mint: return Theme.mint
+        case .mint: return Theme.accent
         case .teal: return .teal
         case .indigo: return .indigo
         case .orange: return .orange
@@ -61,7 +61,7 @@ enum HostColor: String, Codable, CaseIterable, Identifiable {
     /// Für die Live Activity (Widget-Extension kennt Theme nicht).
     var hex: String {
         switch self {
-        case .mint: return "73F2CC"
+        case .mint: return "6CC7FF"
         case .teal: return "30B0C7"
         case .indigo: return "5856D6"
         case .orange: return "FF9500"
@@ -100,6 +100,8 @@ struct Host: Identifiable, Codable, Hashable {
     var principalMap: [PrincipalMapping] = []
     /// Ob der Server per Auto-Install eingerichtet wurde.
     var setupDone: Bool = false
+    /// Beim Verbinden erkanntes Betriebssystem.
+    var os: HostOS?
 
     init() {}
 
@@ -122,7 +124,7 @@ struct Host: Identifiable, Codable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, hostname, port, username, auth, principals, color, tags, knownHostKey
-        case transport, keepAlive, tmuxSession, principalMap, setupDone
+        case transport, keepAlive, tmuxSession, principalMap, setupDone, os
     }
 
     init(from decoder: Decoder) throws {
@@ -142,5 +144,6 @@ struct Host: Identifiable, Codable, Hashable {
         tmuxSession = try c.decodeIfPresent(String.self, forKey: .tmuxSession) ?? ""
         principalMap = try c.decodeIfPresent([PrincipalMapping].self, forKey: .principalMap) ?? []
         setupDone = try c.decodeIfPresent(Bool.self, forKey: .setupDone) ?? false
+        os = try? c.decodeIfPresent(HostOS.self, forKey: .os)
     }
 }

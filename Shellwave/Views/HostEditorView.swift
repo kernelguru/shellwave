@@ -178,6 +178,11 @@ struct HostEditorView: View {
     }
 
     private func save() {
+        // Inzwischen erkanntes Betriebssystem nicht mit dem alten Stand überschreiben
+        if let stored = hosts.hosts.first(where: { $0.id == host.id }) {
+            host.os = stored.os
+            if stored.hostname != host.hostname.trimmed { host.os = nil }
+        }
         host.hostname = host.hostname.trimmed
         host.username = host.username.trimmed
         host.port = host.isNetBird ? NetBirdManager.sshPort : (Int(portText) ?? 22)
