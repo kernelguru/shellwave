@@ -67,6 +67,8 @@ final class NetBirdManager: ObservableObject {
     @Published private(set) var goLog = ""
 
     private var node: NbkitNode?
+    /// Wann das Overlay zuletzt gestartet wurde (Peer-Liste und Verbindungen brauchen kurz).
+    private var overlayStartedAt: Date?
     private var token: String?
     private var tokenTask: Task<String, Error>?
     private var proxies: [String: Int] = [:]
@@ -278,6 +280,7 @@ final class NetBirdManager: ObservableObject {
                 try await launch(jwt: fresh)
             }
             peerRegistered = true
+            overlayStartedAt = .now
             state = .running
             note("Overlay läuft")
             refreshPeers()
@@ -337,6 +340,7 @@ final class NetBirdManager: ObservableObject {
     func stopOverlay() async {
         guard let node else { return }
         self.node = nil
+        overlayStartedAt = nil
         proxies = [:]
         peers = []
         ownIP = ""
@@ -453,12 +457,47 @@ final class NetBirdManager: ObservableObject {
         throw NetBirdError.peerNotFound(name)
     }
 
-    /// Verbindet per NetBird SSH: Overlay sicherstellen, Token holen (Cache oder Browser),
-    /// Host-Key gegen NetBird prüfen.
-    func connectSSH(host: Host, username: String) async throws -> SSHClient {
+    /// Wartet, bis der Peer in der Peer-Liste auftaucht (kommt kurz nach dem Overlay-Start).
+    private func waitForPeerIP(_ name: String, timeout: TimeInterval = 20, progress: ((String) -> Void)?) async throws -> String {
+        let deadline = Date.now.addingTimeInterval(timeout)
+        var announced = false
+        while true {
+            if let ip = try? peerIP(for: name) { return ip }
+            if Date.now >= deadline { throw NetBirdError.peerNotFound(name) }
+            if !announced {
+                announced = true
+                progress?("Warte auf Peer im NetBird-Netz …")
+                note("Warte auf Peer \(name) …")
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+    }
+
+    /// Verbindet per NetBird SSH: Overlay sicherstellen, auf den Peer warten, Token holen
+    /// (Cache oder Browser), Host-Key gegen NetBird prüfen. Direkt nach dem Overlay-Start
+    /// wird ein fehlgeschlagener Aufbau einmal wiederholt.
+    func connectSSH(host: Host, username: String, progress: ((String) -> Void)? = nil) async throws -> SSHClient {
+        if node == nil { progress?("NetBird startet …") }
         try await ensureOverlay()
-        let ip = try peerIP(for: host.hostname)
+        let ip = try await waitForPeerIP(host.hostname, progress: progress)
         let token = try await obtainToken()
+        progress?("Verbinde über NetBird …")
+        do {
+            return try await sshAttempt(host: host, username: username, ip: ip, token: token)
+        } catch let error where Self.isRetryable(error) && (overlayStartedAt.map { Date.now.timeIntervalSince($0) < 45 } ?? false) {
+            note("Peer noch nicht erreichbar, neuer Versuch in 2 s …")
+            progress?("Peer wird erreichbar, neuer Versuch …")
+            try await Task.sleep(for: .seconds(2))
+            return try await sshAttempt(host: host, username: username, ip: ip, token: token)
+        }
+    }
+
+    private static func isRetryable(_ error: Error) -> Bool {
+        if case NetBirdError.sshRejected = error { return false }
+        return true
+    }
+
+    private func sshAttempt(host: Host, username: String, ip: String, token: String) async throws -> SSHClient {
         let port = try proxyPort(for: ip)
         let validator = NetBirdHostKeyValidator(node: node, peerAddress: ip)
         var settings = SSHClientSettings(
@@ -565,7 +604,7 @@ enum NetBirdError: LocalizedError {
         case .notRunning: return "Das NetBird-Overlay läuft nicht."
         case .disabled: return "NetBird (Beta) ist in den Einstellungen ausgeschaltet."
         case .sshRejected: return "Der NetBird-SSH-Server hat die Anmeldung abgelehnt. Ist SSH für diesen Peer in NetBird erlaubt (Peer-Einstellungen, Zugriffsrichtlinie)? Beim nächsten Versuch meldest du dich neu an."
-        case .peerNotFound(let name): return "Peer „\(name)“ ist im NetBird-Netz nicht bekannt."
+        case .peerNotFound(let name): return "Peer „\(name)“ ist nach 20 Sekunden nicht im NetBird-Netz sichtbar. Ist er online, und erlaubt eine Zugriffsrichtlinie die Verbindung von diesem Gerät?"
         case .http(let m): return m
         case .hostKey(let m): return m
         }

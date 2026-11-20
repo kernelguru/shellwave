@@ -37,6 +37,9 @@ final class TerminalSession: ObservableObject, Identifiable {
         }
     }
 
+    /// Zusatzinfo während des Verbindungsaufbaus (z. B. „Warte auf Peer …“).
+    @Published private(set) var connectingDetail: String?
+
     let id = UUID()
     private let initialHost: Host
     /// Immer die aktuell gespeicherte Fassung des Hosts (Änderungen gelten beim nächsten Verbinden).
@@ -193,7 +196,11 @@ final class TerminalSession: ObservableObject, Identifiable {
         activeTransport = host.isNetBird ? .netbird : .ssh
         do {
             state = host.auth == .certificate && !host.isNetBird ? .renewingCertificate : .connecting
-            let client = try await SSHConnector.connect(to: host, certificates: certificates, hosts: hosts)
+            connectingDetail = nil
+            let client = try await SSHConnector.connect(to: host, certificates: certificates, hosts: hosts) { [weak self] text in
+                self?.connectingDetail = text
+            }
+            connectingDetail = nil
             state = .connecting
             self.client = client
             SharedConnections.shared.register(client, for: initialHost.id)
@@ -242,6 +249,7 @@ final class TerminalSession: ObservableObject, Identifiable {
             state = .closed
         } catch {
             resizeHandler = nil
+            connectingDetail = nil
             if runTask != nil { state = .failed(Self.describe(error)) }
         }
         if let client { SharedConnections.shared.unregister(client, for: initialHost.id) }

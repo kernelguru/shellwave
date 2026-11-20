@@ -134,7 +134,11 @@ struct HostCard: View {
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     Badge(text: host.transport.label, symbol: host.transport.symbol)
-                    Badge(text: host.auth.label, symbol: host.auth.symbol)
+                    if host.isNetBird {
+                        Badge(text: "NetBird-Login", symbol: "person.badge.key")
+                    } else {
+                        Badge(text: host.auth.label, symbol: host.auth.symbol)
+                    }
                     ForEach(host.tags.prefix(1), id: \.self) { Badge(text: $0, symbol: "tag") }
                 }
             }

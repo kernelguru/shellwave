@@ -18,10 +18,11 @@ enum SSHConnector {
         certificates: CertificateManager,
         hosts: HostStore,
         override: AuthOverride? = nil,
-        username: String? = nil
+        username: String? = nil,
+        progress: ((String) -> Void)? = nil
     ) async throws -> SSHClient {
         if host.isNetBird {
-            return try await NetBirdManager.shared.connectSSH(host: host, username: username ?? host.username)
+            return try await NetBirdManager.shared.connectSSH(host: host, username: username ?? host.username, progress: progress)
         }
         let auth = try await authentication(for: host, certificates: certificates, override: override, username: username)
         let hostID = host.id

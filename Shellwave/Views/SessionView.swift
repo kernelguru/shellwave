@@ -149,6 +149,11 @@ struct SessionView: View {
             case .renewingCertificate, .connecting, .idle:
                 ProgressView().controlSize(.large)
                 Text(session.state.label).font(.headline)
+                if let detail = session.connectingDetail {
+                    Text(detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             case .failed(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 30))
