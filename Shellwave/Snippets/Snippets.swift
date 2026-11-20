@@ -96,9 +96,9 @@ final class SnippetRunner: ObservableObject {
             for host in targets {
                 group.addTask { @MainActor in
                     do {
-                        let client = try await SSHConnector.connect(to: host, certificates: certificates, hosts: hosts)
-                        let r = try await SSHConnector.runCapturing(command, on: client)
-                        try? await client.close()
+                        let lease = try await SSHConnector.lease(to: host, certificates: certificates, hosts: hosts)
+                        let r = try await SSHConnector.runCapturing(command, on: lease.client)
+                        await lease.release()
                         self.finish(host.id, output: r.output, code: r.exitCode)
                     } catch {
                         self.finish(host.id, output: TerminalSession.describe(error), code: -1)

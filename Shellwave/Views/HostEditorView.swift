@@ -10,6 +10,8 @@ struct HostEditorView: View {
     @State private var tagsText: String
     @State private var password: String
     @State private var showSetup = false
+    @State private var showPeerPicker = false
+    @ObservedObject private var netbird = NetBirdManager.shared
 
     init(host: Host) {
         _host = State(initialValue: host)
@@ -20,52 +22,75 @@ struct HostEditorView: View {
     }
 
     private var isNew: Bool { !hosts.hosts.contains { $0.id == host.id } }
-    private var canSave: Bool { !host.hostname.trimmed.isEmpty && !host.username.trimmed.isEmpty && Int(portText) != nil }
+    private var canSave: Bool {
+        !host.hostname.trimmed.isEmpty && !host.username.trimmed.isEmpty && (host.isNetBird || Int(portText) != nil)
+    }
 
     var body: some View {
         Form {
-            Section("Verbindung") {
+            Section {
+                Picker("Verbindung", selection: $host.transport) {
+                    ForEach(Transport.available(netbird: netbird.enabled || host.isNetBird)) {
+                        Label($0.label, systemImage: $0.symbol).tag($0)
+                    }
+                }
+                .pickerStyle(.segmented)
                 TextField("Name (optional)", text: $host.name)
-                TextField("Hostname oder IP", text: $host.hostname)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                TextField("Port", text: $portText)
-                    .keyboardType(.numberPad)
+                if host.isNetBird {
+                    HStack {
+                        TextField("Peer (NetBird-Name oder IP)", text: $host.hostname)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                        Button("Auswählen", systemImage: "list.bullet") { showPeerPicker = true }
+                            .labelStyle(.iconOnly)
+                    }
+                } else {
+                    TextField("Hostname oder IP", text: $host.hostname)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    TextField("Port", text: $portText)
+                        .keyboardType(.numberPad)
+                }
                 TextField("Benutzer", text: $host.username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-            }
-
-            Section {
-                Picker("Anmeldung", selection: $host.auth) {
-                    ForEach(AuthMethod.allCases) { Label($0.label, systemImage: $0.symbol).tag($0) }
-                }
-                switch host.auth {
-                case .certificate:
-                    TextField("Principals (leer = Benutzer)", text: $principalsText)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                case .key:
-                    Text("Der Public Key dieses Geräts muss in `authorized_keys` stehen. Du findest ihn unter Einstellungen.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                case .password:
-                    SecureField("Passwort", text: $password)
-                }
             } header: {
-                Text("Anmeldung")
+                Text("Verbindung")
             } footer: {
-                if host.auth == .certificate {
-                    Text("Die App holt sich vor dem Verbinden ein Zertifikat von UCM mit diesen Principals. Auf dem Server müssen sie in der AuthorizedPrincipalsFile des Benutzers stehen.")
+                if host.isNetBird {
+                    Text("NetBird SSH (Beta): Die App verbindet sich über das eingebettete NetBird-Overlay mit dem SSH-Server des Peers. Anmeldung über deinen NetBird-Login, der Host-Key wird von NetBird geprüft. Auf dem Peer muss SSH in NetBird erlaubt sein.")
+                }
+            }
+
+            if !host.isNetBird {
+                Section {
+                    Picker("Anmeldung", selection: $host.auth) {
+                        ForEach(AuthMethod.allCases) { Label($0.label, systemImage: $0.symbol).tag($0) }
+                    }
+                    switch host.auth {
+                    case .certificate:
+                        TextField("Principals (leer = Benutzer)", text: $principalsText)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    case .key:
+                        Text("Der Public Key dieses Geräts muss in `authorized_keys` stehen. Du findest ihn unter Einstellungen.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    case .password:
+                        SecureField("Passwort", text: $password)
+                    }
+                } header: {
+                    Text("Anmeldung")
+                } footer: {
+                    if host.auth == .certificate {
+                        Text("Die App holt sich vor dem Verbinden ein Zertifikat von UCM mit diesen Principals. Auf dem Server müssen sie in der AuthorizedPrincipalsFile des Benutzers stehen.")
+                    }
                 }
             }
 
             Section {
-                Picker("Transport", selection: $host.transport) {
-                    ForEach(Transport.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
                 Toggle("Im Hintergrund am Leben halten", isOn: $host.keepAlive)
                 TextField("tmux-Session (leer = aus)", text: $host.tmuxSession)
                     .textInputAutocapitalization(.never)
@@ -73,10 +98,14 @@ struct HostEditorView: View {
             } header: {
                 Text("Session")
             } footer: {
-                Text("Mosh übersteht Netzwechsel und Sperrbildschirm; auf dem Server muss mosh-server installiert sein (UDP 60000–61000). Keep-alive nutzt grobe Standort-Updates. Mit tmux-Session hängt sich die App beim Verbinden automatisch an.")
+                if host.isNetBird {
+                    Text("Keep-alive nutzt grobe Standort-Updates und hält auch das NetBird-Overlay am Leben. Mit tmux-Session hängt sich die App beim Verbinden automatisch an.")
+                } else {
+                    Text("Mosh übersteht Netzwechsel und Sperrbildschirm; auf dem Server muss mosh-server installiert sein (UDP 60000–61000). Keep-alive nutzt grobe Standort-Updates. Mit tmux-Session hängt sich die App beim Verbinden automatisch an.")
+                }
             }
 
-            if !isNew {
+            if !isNew && !host.isNetBird {
                 Section {
                     Button("Server einrichten …", systemImage: "wand.and.stars") { showSetup = true }
                 } footer: {
@@ -96,7 +125,7 @@ struct HostEditorView: View {
                     .textInputAutocapitalization(.never)
             }
 
-            if let known = host.knownHostKey {
+            if let known = host.knownHostKey, !host.isNetBird {
                 Section {
                     Text(TOFUHostKeyValidator.fingerprint(of: known))
                         .font(.footnote.monospaced())
@@ -111,6 +140,16 @@ struct HostEditorView: View {
         }
         .scrollContentBackground(.hidden)
         .background(AppBackground())
+        .sheet(isPresented: $showPeerPicker) {
+            NavigationStack {
+                NetBirdPeerPicker { peer in
+                    host.hostname = peer.fqdn
+                    if host.name.trimmed.isEmpty {
+                        host.name = peer.fqdn.split(separator: ".").first.map(String.init) ?? peer.fqdn
+                    }
+                }
+            }
+        }
         .sheet(isPresented: $showSetup, onDismiss: reloadAfterSetup) {
             NavigationStack { ServerSetupView(host: host) }
         }
@@ -141,7 +180,7 @@ struct HostEditorView: View {
     private func save() {
         host.hostname = host.hostname.trimmed
         host.username = host.username.trimmed
-        host.port = Int(portText) ?? 22
+        host.port = host.isNetBird ? NetBirdManager.sshPort : (Int(portText) ?? 22)
         host.principals = SignRequest.parsePrincipals(principalsText)
         host.tags = SignRequest.parsePrincipals(tagsText)
         host.password = host.auth == .password ? password : ""

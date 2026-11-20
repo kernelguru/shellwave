@@ -20,6 +20,9 @@ Live Activity und Claude Code als Assistent. Spezifikation: siehe Claude-Doc
 - **Claude**: Claude Code headless auf dem Server (stream-json, Freigaben über `--permission-prompt-tool stdio`)
   oder Claude-API aus der App mit `run_command`; lesende Befehle automatisch, Rest mit Face ID
 - **SFTP**-Browser mit Up-/Download, Ordner anlegen, Umbenennen, Löschen
+- **NetBird (Beta)**: NetBird SSH zu Peers ohne VPN-App – eingebettetes Overlay (NetBird `client/embed`
+  per gomobile, Userspace-Netstack), Login über NetBirds eigenen OAuth-Ablauf, Host-Key-Prüfung über NetBird.
+  NetBird wird beim Build mit kleinen Patches für iOS versehen (`poc/nbkit/patches`)
 - **Session-Reiter**, Farbschemata (Shellwave, Solarized, Nord, Dracula), Export/Import von Hosts und Snippets
 
 ## Bauen

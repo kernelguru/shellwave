@@ -49,7 +49,8 @@ final class SFTPModel: ObservableObject {
     let host: Host
     private let certificates: CertificateManager
     private let hosts: HostStore
-    private var client: SSHClient?
+    private var lease: SSHLease?
+    private var client: SSHClient? { lease?.client }
     private var sftp: SFTPClient?
 
     init(host: Host, certificates: CertificateManager, hosts: HostStore) {
@@ -63,9 +64,9 @@ final class SFTPModel: ObservableObject {
         loading = true
         defer { loading = false }
         do {
-            let client = try await SSHConnector.connect(to: host, certificates: certificates, hosts: hosts)
-            self.client = client
-            let sftp = try await client.openSFTP()
+            let lease = try await SSHConnector.lease(to: host, certificates: certificates, hosts: hosts)
+            self.lease = lease
+            let sftp = try await lease.client.openSFTP()
             self.sftp = sftp
             let home = try await sftp.getRealPath(atPath: ".")
             await list(home)
@@ -75,12 +76,12 @@ final class SFTPModel: ObservableObject {
     }
 
     func close() {
-        let sftp = self.sftp, client = self.client
+        let sftp = self.sftp, lease = self.lease
         self.sftp = nil
-        self.client = nil
+        self.lease = nil
         Task {
             try? await sftp?.close()
-            try? await client?.close()
+            await lease?.release()
         }
     }
 

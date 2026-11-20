@@ -133,7 +133,7 @@ struct HostCard: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 HStack(spacing: 6) {
-                    Badge(text: host.transport.label, symbol: host.transport == .mosh ? "antenna.radiowaves.left.and.right" : "network")
+                    Badge(text: host.transport.label, symbol: host.transport.symbol)
                     Badge(text: host.auth.label, symbol: host.auth.symbol)
                     ForEach(host.tags.prefix(1), id: \.self) { Badge(text: $0, symbol: "tag") }
                 }

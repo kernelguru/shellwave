@@ -99,17 +99,7 @@ struct SettingsView: View {
 
             BackupSection()
 
-            Section {
-                NavigationLink {
-                    NetBirdTestView()
-                } label: {
-                    Label("NetBird (Test)", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-            } header: {
-                Text("Experimentell")
-            } footer: {
-                Text("Machbarkeitstest: NetBird eingebettet, Login über den eingebauten IdP, NetBird SSH.")
-            }
+            NetBirdBetaSection()
 
             Section("Über") {
                 LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–")
@@ -379,5 +369,38 @@ struct BackupSection: View {
         for s in backup.snippets where !merged.contains(where: { $0.id == s.id }) { merged.append(s) }
         snippets.replaceAll(merged)
         message = "\(added) Host(s) und \(backup.snippets.count) Snippet(s) übernommen."
+    }
+}
+
+/// Experimentell: NetBird SSH über das eingebettete Overlay.
+private struct NetBirdBetaSection: View {
+    @ObservedObject private var nb = NetBirdManager.shared
+
+    var body: some View {
+        Section {
+            Toggle(isOn: $nb.enabled) {
+                Label("NetBird (Beta)", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+            if nb.enabled {
+                NavigationLink {
+                    NetBirdSettingsView()
+                } label: {
+                    LabeledContent("NetBird einrichten", value: status)
+                }
+            }
+        } header: {
+            Text("Experimentell")
+        } footer: {
+            Text("Verbindet per NetBird SSH zu Peers deines NetBird-Netzes – ohne VPN-App. Danach gibt es im Host „NetBird“ als Verbindung.")
+        }
+    }
+
+    private var status: String {
+        switch nb.state {
+        case .running: return "läuft"
+        case .starting: return "startet …"
+        case .failed: return "Fehler"
+        case .idle: return nb.managementURL.trimmed.isEmpty ? "nicht eingerichtet" : (nb.peerRegistered ? "bereit" : "nicht angemeldet")
+        }
     }
 }

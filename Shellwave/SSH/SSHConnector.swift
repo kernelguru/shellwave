@@ -20,6 +20,9 @@ enum SSHConnector {
         override: AuthOverride? = nil,
         username: String? = nil
     ) async throws -> SSHClient {
+        if host.isNetBird {
+            return try await NetBirdManager.shared.connectSSH(host: host, username: username ?? host.username)
+        }
         let auth = try await authentication(for: host, certificates: certificates, override: override, username: username)
         let hostID = host.id
         // Immer den aktuell gespeicherten Host-Key nehmen (die Session hält evtl. eine ältere Kopie).
@@ -69,6 +72,20 @@ enum SSHConnector {
         }
     }
 
+    /// Verbindung für Nebenaufgaben (SFTP, Snippets, Claude). Bei NetBird-Hosts wird die
+    /// Verbindung einer offenen Terminal-Sitzung mitbenutzt (kein neuer Login nötig).
+    static func lease(
+        to host: Host,
+        certificates: CertificateManager,
+        hosts: HostStore
+    ) async throws -> SSHLease {
+        if host.isNetBird, let shared = SharedConnections.shared.client(for: host.id) {
+            return SSHLease(client: shared, owned: false)
+        }
+        let client = try await connect(to: host, certificates: certificates, hosts: hosts)
+        return SSHLease(client: client, owned: true)
+    }
+
     /// Führt einen Befehl aus und liefert stdout+stderr als Text. Wirft bei Exit-Code ≠ 0 nicht,
     /// sondern liefert den Code mit.
     static func run(_ command: String, on client: SSHClient) async throws -> (output: String, exitCode: Int) {
@@ -97,5 +114,38 @@ enum SSHConnector {
     /// Single-Quote-Escaping für die Shell.
     static func quote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+/// Eine SSH-Verbindung, die entweder selbst aufgebaut wurde oder einer Sitzung gehört.
+struct SSHLease {
+    let client: SSHClient
+    /// Selbst aufgebaut → beim Freigeben schließen. Geteilt → offen lassen.
+    let owned: Bool
+
+    func release() async {
+        if owned { try? await client.close() }
+    }
+}
+
+/// Verbindungen laufender Terminal-Sitzungen, die andere Funktionen mitbenutzen dürfen.
+@MainActor
+final class SharedConnections {
+    static let shared = SharedConnections()
+    private var clients: [UUID: SSHClient] = [:]
+
+    func register(_ client: SSHClient, for hostID: UUID) { clients[hostID] = client }
+
+    func unregister(_ client: SSHClient, for hostID: UUID) {
+        if clients[hostID] === client { clients[hostID] = nil }
+    }
+
+    func client(for hostID: UUID) -> SSHClient? {
+        guard let client = clients[hostID] else { return nil }
+        guard client.isConnected else {
+            clients[hostID] = nil
+            return nil
+        }
+        return client
     }
 }

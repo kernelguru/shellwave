@@ -50,7 +50,8 @@ final class ClaudeAgent: ObservableObject {
     private var permissionInputs: [String: [String: Any]] = [:]
 
     // Claude Code
-    private var client: SSHClient?
+    private var lease: SSHLease?
+    private var client: SSHClient? { lease?.client }
     private var writer: TTYStdinWriter?
     /// Ausgehende JSON-Zeilen, in Reihenfolge geschrieben.
     private var outbox: AsyncStream<String>.Continuation?
@@ -143,9 +144,9 @@ final class ClaudeAgent: ObservableObject {
         writer = nil
         outbox?.finish()
         outbox = nil
-        let c = client
-        client = nil
-        Task { try? await c?.close() }
+        let l = lease
+        lease = nil
+        Task { await l?.release() }
         if pending != nil { pending = nil; onApprovalChange?(nil) }
         status = .idle
     }
@@ -181,8 +182,9 @@ final class ClaudeAgent: ObservableObject {
     private func connectClaudeCode(resumeAllowed: Bool = true) async {
         status = .connecting
         do {
-            let client = try await SSHConnector.connect(to: session.host, certificates: session.certificates, hosts: session.hosts)
-            self.client = client
+            let lease = try await SSHConnector.lease(to: session.host, certificates: session.certificates, hosts: session.hosts)
+            self.lease = lease
+            let client = lease.client
 
             let hostID = session.host.id
             var sessionArg: String
@@ -423,7 +425,7 @@ final class ClaudeAgent: ObservableObject {
         status = .working
         do {
             if client == nil {
-                client = try await SSHConnector.connect(to: session.host, certificates: session.certificates, hosts: session.hosts)
+                lease = try await SSHConnector.lease(to: session.host, certificates: session.certificates, hosts: session.hosts)
             }
             for _ in 0..<25 {
                 try Task.checkCancellation()
@@ -507,7 +509,7 @@ final class ClaudeAgent: ObservableObject {
         status = .working
         do {
             if client == nil {
-                client = try await SSHConnector.connect(to: session.host, certificates: session.certificates, hosts: session.hosts)
+                lease = try await SSHConnector.lease(to: session.host, certificates: session.certificates, hosts: session.hosts)
             }
             for _ in 0..<25 {
                 try Task.checkCancellation()
@@ -644,7 +646,7 @@ final class ClaudeAgent: ObservableObject {
         status = .working
         do {
             if client == nil {
-                client = try await SSHConnector.connect(to: session.host, certificates: session.certificates, hosts: session.hosts)
+                lease = try await SSHConnector.lease(to: session.host, certificates: session.certificates, hosts: session.hosts)
             }
             for _ in 0..<25 {
                 try Task.checkCancellation()

@@ -1,23 +1,10 @@
-import SafariServices
 import SwiftUI
 
-/// Versteckte Testansicht für den NetBird-Machbarkeitstest.
-struct NetBirdTestView: View {
+/// Einstellungen und Diagnose für NetBird (Beta).
+struct NetBirdSettingsView: View {
     @ObservedObject private var nb = NetBirdManager.shared
-    @State private var selectedPeer: NetBirdManager.Peer?
-    @State private var username = "root"
-    @State private var command = "whoami; hostname; uptime"
-    @State private var output = ""
-    @State private var running = false
     @State private var confirmReset = false
     @State private var showGoLog = false
-
-    private var loginPrompt: Binding<NetBirdManager.LoginPrompt?> {
-        Binding(
-            get: { nb.loginPrompt },
-            set: { if $0 == nil, nb.loginPrompt != nil { nb.cancelLogin() } }
-        )
-    }
 
     var body: some View {
         Form {
@@ -78,12 +65,12 @@ struct NetBirdTestView: View {
                 }
                 LabeledContent("Peer registriert", value: nb.peerRegistered ? "ja" : "nein")
             } header: {
-                Text("1. Anmelden")
+                Text("Anmeldung")
             } footer: {
                 Text("Originaler NetBird-Login im Browser. Das Token wird 5 Minuten für Overlay-Start und NetBird SSH wiederverwendet.")
             }
 
-            Section("2. Overlay") {
+            Section("Overlay") {
                 switch nb.state {
                 case .running:
                     LabeledContent("Eigene IP", value: nb.ownIP).font(.body.monospaced())
@@ -112,49 +99,17 @@ struct NetBirdTestView: View {
             }
 
             if !nb.peers.isEmpty {
-                Section("3. Peer wählen") {
+                Section("Peers (\(nb.peers.count))") {
                     ForEach(nb.peers) { peer in
-                        Button {
-                            selectedPeer = peer
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(peer.fqdn).font(.subheadline)
-                                    Text("\(peer.ip) · \(peer.status)").font(.caption.monospaced()).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if selectedPeer == peer { Image(systemName: "checkmark").foregroundStyle(Theme.mint) }
+                        HStack {
+                            Image(systemName: "circle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(peer.status.lowercased() == "connected" ? .green : .secondary)
+                            VStack(alignment: .leading) {
+                                Text(peer.fqdn).font(.subheadline)
+                                Text("\(peer.ip) · \(peer.status)").font(.caption.monospaced()).foregroundStyle(.secondary)
                             }
                         }
-                        .tint(.primary)
-                    }
-                }
-            }
-
-            if let peer = selectedPeer {
-                Section("4. NetBird SSH") {
-                    TextField("Benutzer", text: $username)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("Befehl", text: $command)
-                        .font(.body.monospaced())
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Button {
-                        running = true
-                        Task {
-                            output = await nb.runTest(peer: peer, username: username, command: command)
-                            running = false
-                        }
-                    } label: {
-                        HStack {
-                            Text("Auf \(peer.fqdn) ausführen")
-                            if running { Spacer(); ProgressView() }
-                        }
-                    }
-                    .disabled(running)
-                    if !output.isEmpty {
-                        Text(output).font(.caption.monospaced()).textSelection(.enabled)
                     }
                 }
             }
@@ -189,9 +144,10 @@ struct NetBirdTestView: View {
                 }
             }
         }
-        .navigationTitle("NetBird (Test)")
+        .navigationTitle("NetBird (Beta)")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { nb.loadDiagnostics() }
+        .onDisappear { nb.stopIfUnused() }
         .confirmationDialog("NetBird-Daten zurücksetzen?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Zurücksetzen", role: .destructive) { Task { await nb.resetData() } }
         } message: {
@@ -217,19 +173,5 @@ struct NetBirdTestView: View {
                 }
             }
         }
-        .sheet(item: loginPrompt) { prompt in
-            SafariView(url: prompt.url)
-                .ignoresSafeArea()
-        }
     }
-}
-
-struct SafariView: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        SFSafariViewController(url: url)
-    }
-
-    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 }

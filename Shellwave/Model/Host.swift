@@ -22,8 +22,27 @@ enum AuthMethod: String, Codable, CaseIterable, Identifiable {
 
 enum Transport: String, Codable, CaseIterable, Identifiable {
     case ssh, mosh
+    /// NetBird SSH über das eingebettete Overlay (Beta).
+    case netbird
     var id: String { rawValue }
-    var label: String { self == .ssh ? "SSH" : "Mosh" }
+    var label: String {
+        switch self {
+        case .ssh: return "SSH"
+        case .mosh: return "Mosh"
+        case .netbird: return "NetBird"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .ssh: return "network"
+        case .mosh: return "antenna.radiowaves.left.and.right"
+        case .netbird: return "point.3.connected.trianglepath.dotted"
+        }
+    }
+    /// Auswahl im Host-Editor (NetBird nur mit eingeschalteter Beta).
+    static func available(netbird: Bool) -> [Transport] {
+        netbird ? [.ssh, .mosh, .netbird] : [.ssh, .mosh]
+    }
 }
 
 enum HostColor: String, Codable, CaseIterable, Identifiable {
@@ -86,7 +105,11 @@ struct Host: Identifiable, Codable, Hashable {
 
     var displayName: String { name.trimmed.isEmpty ? hostname : name }
     var effectivePrincipals: [String] { principals.isEmpty ? [username] : principals }
-    var address: String { port == 22 ? "\(username)@\(hostname)" : "\(username)@\(hostname):\(port)" }
+    var address: String {
+        if transport == .netbird { return "\(username)@\(hostname) (NetBird)" }
+        return port == 22 ? "\(username)@\(hostname)" : "\(username)@\(hostname):\(port)"
+    }
+    var isNetBird: Bool { transport == .netbird }
 
     // MARK: Passwort (nur Schlüsselbund)
 

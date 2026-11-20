@@ -4,7 +4,7 @@ import NBKit
 import NIOCore
 import NIOSSH
 
-/// Machbarkeitstest: NetBird eingebettet (ohne VPN-Profil). Der Login läuft über
+/// NetBird (Beta): eingebettetes Overlay ohne VPN-Profil. Der Login läuft über
 /// den originalen NetBird-Code (PKCE im Browser, Parameter vom Management-Server),
 /// NetBird SSH bekommt das Token als Passwort.
 @MainActor
@@ -34,6 +34,14 @@ final class NetBirdManager: ObservableObject {
 
     /// So lange wird ein Token wiederverwendet (NetBird SSH akzeptiert höchstens 10 Minuten).
     static let tokenCacheSeconds: TimeInterval = 300
+
+    /// Beta-Schalter in den Einstellungen.
+    @Published var enabled: Bool = UserDefaults.standard.bool(forKey: "netbird.beta") {
+        didSet {
+            UserDefaults.standard.set(enabled, forKey: "netbird.beta")
+            if !enabled { Task { await stopOverlay() } }
+        }
+    }
 
     @Published var managementURL: String = UserDefaults.standard.string(forKey: "netbird.managementURL") ?? "" {
         didSet { UserDefaults.standard.set(managementURL, forKey: "netbird.managementURL") }
@@ -186,13 +194,18 @@ final class NetBirdManager: ObservableObject {
                 self.loginBusy = false
                 if let target = URL(string: link) {
                     self.loginPrompt = LoginPrompt(url: target, userCode: code)
+                    LoginBrowser.shared.onUserDismiss = { [weak self] in self?.cancelLogin() }
+                    LoginBrowser.shared.show(target)
                     self.note(code.isEmpty ? "Browser-Login geöffnet" : "Browser-Login geöffnet, Code \(code)")
                 } else {
                     self.note("Ungültiger Login-Link: \(link)")
                 }
             }
         }
-        defer { loginPrompt = nil }
+        defer {
+            loginPrompt = nil
+            LoginBrowser.shared.dismiss()
+        }
 
         let jwt: String = try await Task.detached {
             var err: NSError?
@@ -214,6 +227,7 @@ final class NetBirdManager: ObservableObject {
     /// Bricht den Browser-Login ab (gibt auch localhost:53000 wieder frei).
     func cancelLogin() {
         loginPrompt = nil
+        LoginBrowser.shared.dismiss()
         Task.detached { NbkitCancelJWTRequest() }
         note("Login abgebrochen")
     }
@@ -359,41 +373,113 @@ final class NetBirdManager: ObservableObject {
         }
     }
 
+    // MARK: Sessions und Lebensdauer
+
+    /// NetBird-Sitzungen, die das Overlay gerade brauchen.
+    private var users: Set<UUID> = []
+    private var stopTask: Task<Void, Never>?
+
+    /// Eine Sitzung braucht das Overlay (Start, Wiederverbinden).
+    func acquire(_ id: UUID) {
+        users.insert(id)
+        stopTask?.cancel()
+        stopTask = nil
+    }
+
+    /// Eine Sitzung wurde getrennt. Ist es die letzte, stoppt das Overlay nach kurzer Wartezeit
+    /// (damit ein schnelles Wiederverbinden das Overlay nicht neu starten muss).
+    func release(_ id: UUID) {
+        guard users.remove(id) != nil, users.isEmpty, node != nil else { return }
+        stopTask?.cancel()
+        stopTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard let self, !Task.isCancelled, self.users.isEmpty else { return }
+            self.note("Keine NetBird-Sitzung mehr offen")
+            await self.stopOverlay()
+        }
+    }
+
+    /// Stoppt das Overlay (nach Wartezeit), wenn keine Sitzung es braucht –
+    /// z. B. nachdem es nur zum Laden der Peer-Liste gestartet wurde.
+    func stopIfUnused() {
+        guard users.isEmpty, node != nil else { return }
+        let marker = UUID()
+        users.insert(marker)
+        release(marker)
+    }
+
+    /// Startet das Overlay, falls nötig, und wartet, bis es läuft.
+    func ensureOverlay() async throws {
+        if node != nil { return }
+        guard enabled else { throw NetBirdError.disabled }
+        guard !managementURL.trimmed.isEmpty else { throw NetBirdError.badURL }
+        while state == .starting {
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        if node != nil { return }
+        await startOverlay()
+        guard node != nil else {
+            if case .failed(let message) = state { throw NetBirdError.http("NetBird: \(message)") }
+            throw NetBirdError.notRunning
+        }
+    }
+
     // MARK: NetBird SSH
+
+    /// Port des NetBird-SSH-Servers auf den Peers.
+    static let sshPort = 22022
 
     /// Lokaler Port, der über das Overlay zu peerIP:22022 (NetBird SSH) führt.
     private func proxyPort(for peerIP: String) throws -> Int {
         if let port = proxies[peerIP] { return port }
         guard let node else { throw NetBirdError.notRunning }
         var port = 0
-        try node.startProxy("\(peerIP):22022", ret0_: &port)
+        try node.startProxy("\(peerIP):\(Self.sshPort)", ret0_: &port)
         proxies[peerIP] = port
         return port
     }
 
-    /// Verbindet per NetBird SSH und führt einen Befehl aus.
-    func runTest(peer: Peer, username: String, command: String) async -> String {
+    /// Overlay-IP zu einem Peer-Namen (FQDN, Kurzname oder IP).
+    func peerIP(for name: String) throws -> String {
+        let wanted = name.trimmed.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        if wanted.split(separator: ".").count == 4, wanted.allSatisfy({ $0.isNumber || $0 == "." }) { return wanted }
+        refreshPeers()
+        if let peer = peers.first(where: {
+            let fqdn = $0.fqdn.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            return fqdn == wanted || fqdn.hasPrefix(wanted + ".")
+        }) {
+            return peer.ip
+        }
+        throw NetBirdError.peerNotFound(name)
+    }
+
+    /// Verbindet per NetBird SSH: Overlay sicherstellen, Token holen (Cache oder Browser),
+    /// Host-Key gegen NetBird prüfen.
+    func connectSSH(host: Host, username: String) async throws -> SSHClient {
+        try await ensureOverlay()
+        let ip = try peerIP(for: host.hostname)
+        let token = try await obtainToken()
+        let port = try proxyPort(for: ip)
+        let validator = NetBirdHostKeyValidator(node: node, peerAddress: ip)
+        var settings = SSHClientSettings(
+            host: "127.0.0.1",
+            port: port,
+            authenticationMethod: { .passwordBased(username: username, password: token) },
+            hostKeyValidator: .custom(validator)
+        )
+        settings.connectTimeout = .seconds(20)
         do {
-            let token = try await obtainToken()
-            let port = try proxyPort(for: peer.ip)
-            note("SSH \(username)@\(peer.fqdn) über 127.0.0.1:\(port)")
-            let validator = NetBirdHostKeyValidator(node: node, peerAddress: peer.ip) { [weak self] text in
-                Task { @MainActor in self?.note(text) }
-            }
-            let settings = SSHClientSettings(
-                host: "127.0.0.1",
-                port: port,
-                authenticationMethod: { .passwordBased(username: username, password: token) },
-                hostKeyValidator: .custom(validator)
-            )
             let client = try await SSHClient.connect(to: settings)
-            let result = try await SSHConnector.runCapturing(command, on: client)
-            try? await client.close()
-            note("Exit \(result.exitCode)")
-            return result.output
+            note("SSH \(username)@\(host.hostname) (\(ip)) verbunden")
+            return client
         } catch {
-            note("Fehler: \(Self.describe(error))")
-            return "Fehler: \(Self.describe(error))"
+            note("SSH \(username)@\(host.hostname): \(Self.describe(error))")
+            if TerminalSession.describe(error) == SSHConnectError.authenticationRejected.errorDescription {
+                // Token wurde abgelehnt: beim nächsten Versuch neu anmelden
+                forgetToken()
+                throw NetBirdError.sshRejected
+            }
+            throw error
         }
     }
 }
@@ -439,47 +525,47 @@ final class PendingNode: @unchecked Sendable {
 }
 
 /// Prüft den Host-Key des Peers gegen den Schlüssel, den NetBird verteilt hat.
+/// Passt er nicht (oder ist keiner bekannt), wird die Verbindung abgebrochen.
 final class NetBirdHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
     private let node: NbkitNode?
     private let peerAddress: String
-    private let report: @Sendable (String) -> Void
 
-    init(node: NbkitNode?, peerAddress: String, report: @escaping @Sendable (String) -> Void) {
+    init(node: NbkitNode?, peerAddress: String) {
         self.node = node
         self.peerAddress = peerAddress
-        self.report = report
     }
 
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
         let line = String(openSSHPublicKey: hostKey)
         let parts = line.split(separator: " ")
         guard parts.count >= 2, let blob = Data(base64Encoded: String(parts[1])), let node else {
-            validationCompletePromise.fail(NetBirdError.hostKey("Host-Key nicht lesbar"))
+            validationCompletePromise.fail(NetBirdError.hostKey("Host-Key nicht lesbar."))
             return
         }
         do {
             try node.verifySSHHostKey(peerAddress, key: blob)
-            report("Host-Key von NetBird bestätigt (\(TOFUHostKeyValidator.fingerprint(of: line)))")
             validationCompletePromise.succeed(())
         } catch {
-            // Für den Test nicht hart abbrechen, sondern sichtbar machen
-            report("Host-Key NICHT bestätigt: \(error.localizedDescription) – Test läuft trotzdem weiter")
-            validationCompletePromise.succeed(())
+            validationCompletePromise.fail(NetBirdError.hostKey(
+                "Der Host-Key von \(peerAddress) passt nicht zu dem, den NetBird kennt (\(TOFUHostKeyValidator.fingerprint(of: line))). Verbindung abgebrochen.\n\(error.localizedDescription)"
+            ))
         }
     }
 }
 
 enum NetBirdError: LocalizedError {
-    case badURL, noDeviceFlow, notLoggedIn, notRunning
+    case badURL, notRunning, disabled, sshRejected
+    case peerNotFound(String)
     case http(String)
     case hostKey(String)
 
     var errorDescription: String? {
         switch self {
-        case .badURL: return "Ungültige Management-URL."
-        case .noDeviceFlow: return "Der IdP bietet keinen Device-Flow an."
-        case .notLoggedIn: return "Nicht angemeldet."
-        case .notRunning: return "Overlay läuft nicht."
+        case .badURL: return "Keine gültige NetBird-Management-URL. Einstellungen → NetBird."
+        case .notRunning: return "Das NetBird-Overlay läuft nicht."
+        case .disabled: return "NetBird (Beta) ist in den Einstellungen ausgeschaltet."
+        case .sshRejected: return "Der NetBird-SSH-Server hat die Anmeldung abgelehnt. Ist SSH für diesen Peer in NetBird erlaubt (Peer-Einstellungen, Zugriffsrichtlinie)? Beim nächsten Versuch meldest du dich neu an."
+        case .peerNotFound(let name): return "Peer „\(name)“ ist im NetBird-Netz nicht bekannt."
         case .http(let m): return m
         case .hostKey(let m): return m
         }

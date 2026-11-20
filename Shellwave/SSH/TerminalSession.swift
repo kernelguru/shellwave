@@ -100,6 +100,8 @@ final class TerminalSession: ObservableObject, Identifiable {
     func disconnect() {
         teardown()
         if state.isActive { state = .closed }
+        // Getrennt: das NetBird-Overlay wird für diese Sitzung nicht mehr gebraucht.
+        NetBirdManager.shared.release(id)
     }
 
     private func teardown() {
@@ -112,6 +114,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         resizeHandler = nil
         let client = self.client
         self.client = nil
+        if let client { SharedConnections.shared.unregister(client, for: initialHost.id) }
         Task { try? await client?.close() }
     }
 
@@ -167,7 +170,9 @@ final class TerminalSession: ObservableObject, Identifiable {
     // MARK: Ablauf
 
     private func run() async {
-        if host.transport == .mosh {
+        if host.isNetBird {
+            NetBirdManager.shared.acquire(id)
+        } else if host.transport == .mosh {
             do {
                 try await runMosh()
                 return
@@ -185,12 +190,13 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     private func runSSH() async {
-        activeTransport = .ssh
+        activeTransport = host.isNetBird ? .netbird : .ssh
         do {
-            state = host.auth == .certificate ? .renewingCertificate : .connecting
+            state = host.auth == .certificate && !host.isNetBird ? .renewingCertificate : .connecting
             let client = try await SSHConnector.connect(to: host, certificates: certificates, hosts: hosts)
             state = .connecting
             self.client = client
+            SharedConnections.shared.register(client, for: initialHost.id)
 
             let (stream, continuation) = AsyncStream<[UInt8]>.makeStream()
             inputContinuation = continuation
@@ -238,6 +244,7 @@ final class TerminalSession: ObservableObject, Identifiable {
             resizeHandler = nil
             if runTask != nil { state = .failed(Self.describe(error)) }
         }
+        if let client { SharedConnections.shared.unregister(client, for: initialHost.id) }
         try? await client?.close()
         client = nil
         runTask = nil
