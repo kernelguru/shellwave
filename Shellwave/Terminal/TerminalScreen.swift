@@ -29,6 +29,21 @@ struct TerminalScreen: UIViewRepresentable {
         pinch.delegate = context.coordinator
         view.addGestureRecognizer(pinch)
 
+        // Langes Drücken: eigenes iOS-Menü statt SwiftTerms veraltetem UIMenuController
+        for gesture in view.gestureRecognizers ?? [] where gesture is UILongPressGestureRecognizer {
+            view.removeGestureRecognizer(gesture)
+        }
+        for interaction in view.interactions where interaction is UIEditMenuInteraction {
+            view.removeInteraction(interaction)
+        }
+        let menu = UIEditMenuInteraction(delegate: context.coordinator)
+        view.addInteraction(menu)
+        context.coordinator.editMenu = menu
+        context.coordinator.view = view
+        let longPress = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
+        longPress.name = "shellwave.longpress"
+        view.addGestureRecognizer(longPress)
+
         DispatchQueue.main.async { _ = view.becomeFirstResponder() }
         return view
     }
@@ -49,10 +64,44 @@ struct TerminalScreen: UIViewRepresentable {
         UIFont.monospacedSystemFont(ofSize: CGFloat(size), weight: .regular)
     }
 
-    final class Coordinator: NSObject, TerminalViewDelegate, UIGestureRecognizerDelegate {
+    final class Coordinator: NSObject, TerminalViewDelegate, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate {
         let session: TerminalSession
         var fontSize: Binding<Double>
         private var pinchStart: Double = 13
+        weak var editMenu: UIEditMenuInteraction?
+        weak var view: TerminalView?
+
+        @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .began, let view, let editMenu else { return }
+            _ = view.becomeFirstResponder()
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            let point = gesture.location(in: view)
+            editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
+        }
+
+        func editMenuInteraction(
+            _ interaction: UIEditMenuInteraction,
+            menuFor configuration: UIEditMenuConfiguration,
+            suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
+            guard let view else { return nil }
+            var items: [UIMenuElement] = []
+            if view.selection?.active == true {
+                items.append(UIAction(title: "Kopieren", image: UIImage(systemName: "doc.on.doc")) { [weak view] _ in
+                    view?.copy(nil)
+                })
+            }
+            if UIPasteboard.general.hasStrings {
+                items.append(UIAction(title: "Einfügen", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.session.pasteFromClipboard() }
+                })
+            }
+            let id = session.id
+            items.append(UIAction(title: "Text auswählen …", image: UIImage(systemName: "selection.pin.in.out")) { _ in
+                NotificationCenter.default.post(name: .shellwaveSelectText, object: id)
+            })
+            return UIMenu(children: items)
+        }
 
         init(session: TerminalSession, fontSize: Binding<Double>) {
             self.session = session

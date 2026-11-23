@@ -174,6 +174,27 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     /// Letzte Zeilen der Ausgabe als Klartext ohne Steuerzeichen (Kontext für Claude).
+    // MARK: Zwischenablage
+
+    /// Gesamter Terminal-Inhalt (inkl. Verlauf, bzw. Vollbild-Programm) als Text.
+    func bufferText() -> String {
+        let data = terminalView.getTerminal().getBufferAsData(kind: .active)
+        var lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Nur die zuletzt sichtbaren Zeilen.
+    func visibleText() -> String {
+        let rows = terminalView.getTerminal().rows
+        return bufferText().components(separatedBy: "\n").suffix(rows).joined(separator: "\n")
+    }
+
+    /// Fügt die Zwischenablage ein (mit Bracketed Paste, wenn die Shell das wünscht).
+    func pasteFromClipboard() {
+        terminalView.paste(nil)
+    }
+
     func screenText(lines: Int = 40) -> String {
         let text = ANSIStripper.strip(String(decoding: recentOutput, as: UTF8.self))
         let all = text.split(separator: "\n", omittingEmptySubsequences: false)

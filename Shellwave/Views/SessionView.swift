@@ -11,6 +11,8 @@ struct SessionView: View {
     @State private var showSFTP = false
     @State private var showThemes = false
     @State private var editingHost: Host?
+    @State private var selectText: (all: String, visible: String)?
+    @State private var showSelect = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -53,6 +55,12 @@ struct SessionView: View {
                 .presentationDetents([.fraction(0.45), .large])
                 .presentationBackgroundInteraction(.enabled(upThrough: .fraction(0.45)))
                 .presentationBackground(.clear)
+        }
+        .sheet(isPresented: $showSelect) {
+            TextSelectView(text: selectText?.all ?? "", visible: selectText?.visible ?? "")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .shellwaveSelectText)) { note in
+            if (note.object as? UUID) == session.id { openSelect() }
         }
         .sheet(isPresented: $showSnippets) {
             NavigationStack { SessionSnippetPicker(session: session) }
@@ -107,6 +115,21 @@ struct SessionView: View {
                 .padding(.horizontal, 14)
                 .frame(height: 40)
                 .glassEffect(.regular, in: .capsule)
+
+                Menu {
+                    Button("Einfügen", systemImage: "doc.on.clipboard") { session.pasteFromClipboard() }
+                        .disabled(!UIPasteboard.general.hasStrings)
+                    Button("Text auswählen …", systemImage: "selection.pin.in.out") { openSelect() }
+                    Button("Bildschirm kopieren", systemImage: "rectangle.on.rectangle") {
+                        UIPasteboard.general.string = session.visibleText()
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    }
+                } label: {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 40, height: 40)
+                }
+                .glassEffect(.regular.interactive(), in: .circle)
 
                 Button {
                     sessions.showClaude = true
@@ -262,4 +285,16 @@ struct ApprovalIndicator: View {
             Image(systemName: "hand.raised.fill").font(.caption2).foregroundStyle(.orange)
         }
     }
+}
+
+extension SessionView {
+    fileprivate func openSelect() {
+        selectText = (session.bufferText(), session.visibleText())
+        showSelect = true
+    }
+}
+
+extension Notification.Name {
+    /// Langes Drücken im Terminal → „Text auswählen …“ (Objekt: Session-ID).
+    static let shellwaveSelectText = Notification.Name("shellwave.selectText")
 }
