@@ -28,29 +28,34 @@ enum AppleIntelligence {
         }
     }
 
+    /// Höchstens so viele Befehle pro Frage, dann muss das Modell antworten.
+    static let maxSteps = 4
+
     static func instructions(host: String, os: String?) -> String {
         """
         Du bist ein knapper Linux-Admin-Assistent in der iOS-App Shellwave. Server: \(host)\(os.map { " (\($0))" } ?? ""). \
-        Mit dem Werkzeug run_command führst du einen Shell-Befehl auf diesem Server aus. Nutze es nur, wenn du Informationen \
-        vom Server brauchst oder der Benutzer eine Aktion möchte. Ein Befehl pro Aufruf, möglichst kurze Ausgabe \
-        (z. B. mit head, tail, grep). Schreibende Befehle muss der Benutzer freigeben. Antworte kurz auf Deutsch.
+        Du antwortest immer mit genau einem Schritt: entweder action command mit einem Shell-Befehl, den die App auf dem \
+        Server ausführt (du bekommst danach die Ausgabe), oder action answer mit der Antwort an den Benutzer. \
+        Brauchst du Informationen vom Server, wähle command – kündige nichts an, führe es aus. \
+        Ein Befehl pro Schritt, mit kurzer Ausgabe (z. B. head, tail, grep). Schreibende Befehle muss der Benutzer freigeben. \
+        Wenn du die Ausgabe hast, antworte mit den konkreten Werten. Antworte kurz auf Deutsch.
         """
     }
 }
 
-/// Werkzeug „run_command“ für das On-Device-Modell. Die Ausführung (inkl. Freigabe) übernimmt der Assistent.
-struct RunCommandTool: Tool {
-    let name = "run_command"
-    let description = "Führt einen Shell-Befehl auf dem verbundenen Server aus und liefert Exit-Code und Ausgabe."
-    let handler: @Sendable (String) async throws -> String
+/// Ein Schritt des On-Device-Modells: entweder Befehl ausführen oder antworten (Guided Generation).
+@Generable
+enum AppleAction {
+    case command
+    case answer
+}
 
-    @Generable
-    struct Arguments {
-        @Guide(description: "Der auszuführende Shell-Befehl, z. B. df -h")
-        var command: String
-    }
-
-    func call(arguments: Arguments) async throws -> String {
-        try await handler(arguments.command)
-    }
+@Generable
+struct AppleStep {
+    @Guide(description: "command: einen Shell-Befehl auf dem Server ausführen. answer: dem Benutzer antworten.")
+    var action: AppleAction
+    @Guide(description: "Nur bei command: der Shell-Befehl, z. B. df -h. Sonst leer.")
+    var command: String
+    @Guide(description: "Nur bei answer: die Antwort an den Benutzer auf Deutsch, mit konkreten Werten. Sonst leer.")
+    var answer: String
 }

@@ -510,12 +510,7 @@ final class ClaudeAgent: ObservableObject {
     // MARK: Apple Intelligence (On-Device-Modell)
 
     private func makeAppleSession() -> LanguageModelSession {
-        let tool = RunCommandTool { [weak self] command in
-            guard let self else { return "Abgebrochen." }
-            return try await self.runForApple(command)
-        }
-        return LanguageModelSession(
-            tools: [tool],
+        LanguageModelSession(
             instructions: AppleIntelligence.instructions(host: session.host.address, os: session.host.os?.label)
         )
     }
@@ -550,14 +545,14 @@ final class ClaudeAgent: ObservableObject {
                 let prompt = isFirst ? appleContext(for: next.text) : next.text
                 let answer: String
                 do {
-                    answer = try await model.respond(to: prompt).content
+                    answer = try await appleSteps(model, prompt: prompt)
                 } catch let error as LanguageModelSession.GenerationError {
                     guard case .exceededContextWindowSize = error else { throw error }
                     // Kontext voll: mit frischer Sitzung noch einmal
                     items.append(ChatItem(id: UUID().uuidString, kind: .notice("Verlauf war zu lang für das Gerätemodell – neu begonnen.")))
                     let fresh = makeAppleSession()
                     appleSession = fresh
-                    answer = try await fresh.respond(to: appleContext(for: next.text)).content
+                    answer = try await appleSteps(fresh, prompt: appleContext(for: next.text))
                 }
                 if !answer.trimmed.isEmpty {
                     items.append(ChatItem(id: UUID().uuidString, kind: .assistant(answer)))
@@ -582,7 +577,44 @@ final class ClaudeAgent: ObservableObject {
         }
     }
 
-    /// Werkzeugaufruf des Gerätemodells: anzeigen, freigeben lassen, ausführen, gekürzt zurückgeben.
+    /// Schrittweise: Das Modell liefert je Schritt einen Befehl oder die Antwort (feste Struktur).
+    private func appleSteps(_ model: LanguageModelSession, prompt: String) async throws -> String {
+        var nextPrompt = prompt
+        var lastCommand = ""
+        for step in 0...AppleIntelligence.maxSteps {
+            try Task.checkCancellation()
+            let result = try await model.respond(to: nextPrompt, generating: AppleStep.self).content
+            let command = result.command.trimmed
+            var isCommand = false
+            if case .command = result.action { isCommand = true }
+            let wantsCommand = isCommand && !command.isEmpty
+            if !wantsCommand {
+                let text = result.answer.trimmed
+                return text.isEmpty ? "(Keine Antwort vom Gerätemodell.)" : text
+            }
+            if step == AppleIntelligence.maxSteps {
+                return result.answer.trimmed.isEmpty
+                    ? "Ich konnte die Frage nicht in \(AppleIntelligence.maxSteps) Schritten beantworten. Versuch es genauer oder mit einem anderen Anbieter."
+                    : result.answer.trimmed
+            }
+            if command == lastCommand {
+                nextPrompt = "Diesen Befehl hast du gerade ausgeführt. Antworte jetzt mit action answer anhand der Ausgabe."
+                continue
+            }
+            lastCommand = command
+            let output = try await runForApple(command)
+            let remaining = AppleIntelligence.maxSteps - step - 1
+            nextPrompt = """
+            Ausgabe von `\(command)`:
+            \(output)
+
+            \(remaining > 0 ? "Brauchst du noch einen Befehl (action command) oder kannst du antworten (action answer)?" : "Antworte jetzt mit action answer.")
+            """
+        }
+        return "(Keine Antwort vom Gerätemodell.)"
+    }
+
+    /// Befehl des Gerätemodells: anzeigen, freigeben lassen, ausführen, gekürzt zurückgeben.
     private func runForApple(_ command: String) async throws -> String {
         let id = UUID().uuidString
         let command = command.trimmed
