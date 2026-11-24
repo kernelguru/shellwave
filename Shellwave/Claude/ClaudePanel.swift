@@ -97,6 +97,7 @@ struct ClaudePanel: View {
         case .anthropic: return "Claude"
         case .google: return "Gemini"
         case .openAICompatible: return "Assistent"
+        case .apple: return "Apple Intelligence"
         }
     }
     private var modeText: String {
@@ -107,6 +108,7 @@ struct ClaudePanel: View {
             case .anthropic: return "Claude-API"
             case .google: return "Gemini-API"
             case .openAICompatible: return settings.openAIModel
+            case .apple: return "Auf dem Gerät"
             }
         }
     }

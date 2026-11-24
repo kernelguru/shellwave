@@ -13,12 +13,15 @@ enum ClaudeMode: String, CaseIterable, Identifiable {
 /// Anbieter für den Modus „API aus der App“.
 enum APIProvider: String, CaseIterable, Identifiable {
     case anthropic, google, openAICompatible
+    /// Apples On-Device-Modell (Apple Intelligence)
+    case apple
     var id: String { rawValue }
     var label: String {
         switch self {
         case .anthropic: return "Claude (Anthropic)"
         case .google: return "Gemini (Google)"
         case .openAICompatible: return "OpenAI-kompatibel"
+        case .apple: return "Apple Intelligence (auf dem Gerät)"
         }
     }
 }

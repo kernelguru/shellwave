@@ -1,5 +1,6 @@
 import Citadel
 import Foundation
+import FoundationModels
 import LocalAuthentication
 import NIOCore
 
@@ -68,6 +69,9 @@ final class ClaudeAgent: ObservableObject {
     /// Verlauf im OpenAI-Chat-Format (Groq, Mistral, OpenRouter, Ollama …)
     private var openAIMessages: [[String: Any]] = []
     private var apiTask: Task<Void, Never>?
+    /// Apple Intelligence: Sitzung (hält den Verlauf selbst) und wartende Eingaben.
+    private var appleSession: LanguageModelSession?
+    private var applePrompts: [(prompt: String, text: String)] = []
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
 
     init(session: TerminalSession) {
@@ -92,6 +96,7 @@ final class ClaudeAgent: ObservableObject {
             apiMessages.append(["role": "user", "content": prompt])
             geminiContents.append(["role": "user", "parts": [["text": prompt]]])
             openAIMessages.append(["role": "user", "content": prompt])
+            applePrompts.append((prompt, text))
             runAPILoop()
         }
     }
@@ -132,6 +137,8 @@ final class ClaudeAgent: ObservableObject {
         apiMessages = []
         geminiContents = []
         openAIMessages = []
+        appleSession = nil
+        applePrompts = []
         didSendContext = false
         ClaudeSessionIDs.set(nil, for: session.host.id)
     }
@@ -412,7 +419,9 @@ final class ClaudeAgent: ObservableObject {
             case .anthropic: await self?.apiLoop()
             case .google: await self?.geminiLoop()
             case .openAICompatible: await self?.openAILoop()
+            case .apple: await self?.appleLoop()
             }
+            self?.applePrompts = []
             self?.apiTask = nil
         }
     }
@@ -496,6 +505,100 @@ final class ClaudeAgent: ObservableObject {
         jeder schreibende Befehl muss vom Benutzer freigegeben werden. Prüfe erst den Zustand, dann ändere. \
         Antworte knapp auf Deutsch.
         """
+    }
+
+    // MARK: Apple Intelligence (On-Device-Modell)
+
+    private func makeAppleSession() -> LanguageModelSession {
+        let tool = RunCommandTool { [weak self] command in
+            guard let self else { return "Abgebrochen." }
+            return try await self.runForApple(command)
+        }
+        return LanguageModelSession(
+            tools: [tool],
+            instructions: AppleIntelligence.instructions(host: session.host.address, os: session.host.os?.label)
+        )
+    }
+
+    /// Kurzer Kontext für das kleine Kontextfenster.
+    private func appleContext(for text: String) -> String {
+        var screen = session.screenText(lines: 15)
+        if screen.count > AppleIntelligence.maxScreenContext {
+            screen = String(screen.suffix(AppleIntelligence.maxScreenContext))
+        }
+        guard !screen.isEmpty else { return text }
+        return "Letzte Terminal-Ausgabe:\n\(screen)\n\nFrage: \(text)"
+    }
+
+    private func appleLoop() async {
+        guard AppleIntelligence.isAvailable else {
+            items.append(ChatItem(id: UUID().uuidString, kind: .error(AppleIntelligence.statusText)))
+            return
+        }
+        status = .working
+        do {
+            if client == nil {
+                lease = try await SSHConnector.lease(to: session.host, certificates: session.certificates, hosts: session.hosts)
+            }
+            while !applePrompts.isEmpty {
+                try Task.checkCancellation()
+                let next = applePrompts.removeFirst()
+                let isFirst = appleSession == nil
+                let model = appleSession ?? makeAppleSession()
+                appleSession = model
+                // Beim ersten Mal den (gekürzten) Bildschirm mitgeben, danach nur die Frage
+                let prompt = isFirst ? appleContext(for: next.text) : next.text
+                let answer: String
+                do {
+                    answer = try await model.respond(to: prompt).content
+                } catch let error as LanguageModelSession.GenerationError {
+                    guard case .exceededContextWindowSize = error else { throw error }
+                    // Kontext voll: mit frischer Sitzung noch einmal
+                    items.append(ChatItem(id: UUID().uuidString, kind: .notice("Verlauf war zu lang für das Gerätemodell – neu begonnen.")))
+                    let fresh = makeAppleSession()
+                    appleSession = fresh
+                    answer = try await fresh.respond(to: appleContext(for: next.text)).content
+                }
+                if !answer.trimmed.isEmpty {
+                    items.append(ChatItem(id: UUID().uuidString, kind: .assistant(answer)))
+                }
+            }
+            status = .ready
+        } catch is CancellationError {
+            status = .ready
+        } catch let error as LanguageModelSession.GenerationError {
+            let text: String
+            switch error {
+            case .guardrailViolation: text = "Apple Intelligence hat die Anfrage aus Sicherheitsgründen abgelehnt. Formuliere sie anders oder nutze einen anderen Anbieter."
+            case .exceededContextWindowSize: text = "Die Anfrage ist zu lang für das Gerätemodell."
+            case .unsupportedLanguageOrLocale: text = "Diese Sprache wird vom Gerätemodell nicht unterstützt."
+            default: text = "Apple Intelligence: \(error.localizedDescription)"
+            }
+            status = .failed(text)
+            items.append(ChatItem(id: UUID().uuidString, kind: .error(text)))
+        } catch {
+            status = .failed(TerminalSession.describe(error))
+            items.append(ChatItem(id: UUID().uuidString, kind: .error(TerminalSession.describe(error))))
+        }
+    }
+
+    /// Werkzeugaufruf des Gerätemodells: anzeigen, freigeben lassen, ausführen, gekürzt zurückgeben.
+    private func runForApple(_ command: String) async throws -> String {
+        let id = UUID().uuidString
+        let command = command.trimmed
+        items.append(ChatItem(id: id, kind: .tool(name: "run_command", summary: command, output: "", done: false, failed: false)))
+        guard !command.isEmpty else {
+            finishTool(id: id, output: "Leerer Befehl", failed: true)
+            return "Leerer Befehl. Gib im Feld command einen Shell-Befehl an."
+        }
+        guard let result = try await executeTool(id: id, command: command, input: ["command": command]) else {
+            return "Der Benutzer hat diesen Befehl abgelehnt. Führe ihn nicht erneut aus."
+        }
+        var output = result.output
+        if output.count > AppleIntelligence.maxToolOutput {
+            output = "… (gekürzt)\n" + String(output.suffix(AppleIntelligence.maxToolOutput))
+        }
+        return "exit code \(result.exitCode)\n\(output)"
     }
 
     // MARK: OpenAI-kompatibel (Groq, Mistral, OpenRouter, Ollama …)

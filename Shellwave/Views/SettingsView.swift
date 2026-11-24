@@ -172,6 +172,7 @@ struct ClaudeSettingsSection: View {
 
     private var usesGemini: Bool { claude.mode == .api && claude.apiProvider == .google }
     private var usesOpenAI: Bool { claude.mode == .api && claude.apiProvider == .openAICompatible }
+    private var usesApple: Bool { claude.mode == .api && claude.apiProvider == .apple }
 
     var body: some View {
         Section {
@@ -184,7 +185,13 @@ struct ClaudeSettingsSection: View {
                 }
             }
 
-            if usesOpenAI {
+            if usesApple {
+                LabeledContent("Status") {
+                    Text(AppleIntelligence.statusText)
+                        .foregroundStyle(AppleIntelligence.isAvailable ? .green : .orange)
+                        .multilineTextAlignment(.trailing)
+                }
+            } else if usesOpenAI {
                 Menu {
                     ForEach(OpenAIPreset.all) { preset in
                         Button(preset.name) { claude.apply(preset) }
@@ -251,6 +258,8 @@ struct ClaudeSettingsSection: View {
             return "Claude Code läuft auf dem Server (Installation über „Server einrichten“, Login einmal mit `claude auth login`). Ohne übergebenen Schlüssel nutzt es dein Claude-Abo."
         case .api where claude.apiProvider == .openAICompatible:
             return "Jeder Dienst mit OpenAI-Format: Groq, Mistral, OpenRouter oder dein eigenes Ollama. Das Modell muss Werkzeugaufrufe (Tool Calling) beherrschen. Gratis-Stufen sind begrenzt; Datenschutz je nach Anbieter prüfen."
+        case .api where claude.apiProvider == .apple:
+            return "Apples Modell läuft komplett auf dem iPhone: kostenlos, ohne Schlüssel, nichts verlässt das Gerät. Es ist klein (kurzer Verlauf, Ausgaben werden gekürzt) – gut für Erklärungen und einzelne Befehle, für größere Aufgaben besser Claude Code."
         case .api where claude.apiProvider == .google:
             return "Gemini über die API: Schlüssel kostenlos in Google AI Studio. Achtung: In der Gratis-Stufe darf Google Anfragen zur Verbesserung seiner Produkte nutzen – also auch Befehle und Terminal-Ausgaben."
         case .api:
